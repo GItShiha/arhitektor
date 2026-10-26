@@ -18,10 +18,11 @@ def test_migration_repeatable(library):
         "works",
         "scenes",
         "alembic_version",
+        "article_relations",
     }
     with engine.connect() as connection:
         assert (
-            connection.exec_driver_sql("select version_num from alembic_version").scalar() == "0001"
+            connection.exec_driver_sql("select version_num from alembic_version").scalar() == "0002"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
     engine.dispose()

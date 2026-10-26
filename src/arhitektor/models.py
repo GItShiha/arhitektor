@@ -57,3 +57,19 @@ class Scene(Entity):
     content: Mapped[str] = mapped_column(Text, default="")
     position: Mapped[int]
     word_count: Mapped[int] = mapped_column(default=0)
+
+
+class ArticleRelation(Base):
+    __tablename__ = "article_relations"
+    __table_args__ = (
+        UniqueConstraint("source_id", "target_id", "label", name="uq_article_relation"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), index=True
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), index=True
+    )
+    label: Mapped[str] = mapped_column(String(200))
+    reverse_label: Mapped[str] = mapped_column(String(200))
