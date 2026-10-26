@@ -129,7 +129,15 @@ class NavigationPanel(QWidget):
             for row in catalog["article"]:
                 if universe_id is not None and row["universe_id"] != universe_id:
                     continue
-                if section in ARTICLE_KINDS and row["kind"].casefold() != ARTICLE_KINDS[section]:
+                template = next(
+                    (t for t in catalog.get("template", []) if t["id"] == row.get("template_id")),
+                    {},
+                )
+                category = template.get("navigation_kind", "").casefold()
+                if section in ARTICLE_KINDS and ARTICLE_KINDS[section] not in (
+                    row["kind"].casefold(),
+                    category,
+                ):
                     continue
                 groups[row["kind"]].append(row)
             for category, rows in sorted(groups.items()):

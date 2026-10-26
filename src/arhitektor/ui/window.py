@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
 
 from arhitektor.relations import Relations
 from arhitektor.services import Library, count_words
+from arhitektor.templates import Templates
 from arhitektor.ui.jobs import Jobs
 from arhitektor.ui.navigation import NavigationPanel
 from arhitektor.ui.properties import FieldEditor, PropertiesPanel
 from arhitektor.ui.relations import RelatedObjects, RelationDialog
+from arhitektor.ui.templates import TemplateDialog
 
 NAMES = {"universe": "Вселенная", "article": "Статья", "work": "Произведение", "scene": "Сцена"}
 
@@ -84,6 +86,10 @@ class MainWindow(QMainWindow):
         self.split.addWidget(self.page)
         self.props = PropertiesPanel()
         self.props.changed.connect(self.changed)
+        self.props.template_requested.connect(
+            lambda identifier: self.guard(lambda: self.assign_template(identifier))
+        )
+        self.props.open_requested.connect(lambda identifier: self.navigate(("article", identifier)))
         self.split.addWidget(self.props)
         self.split.setStretchFactor(1, 1)
         self.normal_splitter_state = None
@@ -297,7 +303,13 @@ class MainWindow(QMainWindow):
     def render(self, kind, row):
         self.clear()
         self.loading = True
-        self.props.show_record(kind, row, self.catalog["universe"])
+        self.props.show_record(
+            kind,
+            row,
+            self.catalog["universe"],
+            self.catalog.get("template", []),
+            self.catalog["article"],
+        )
         self.fields.update(self.props.fields)
         self.view_section = self.nav.section
         self.view_universe = self.nav.universe_id
@@ -382,6 +394,71 @@ class MainWindow(QMainWindow):
         self._button("Удалить", lambda: self.guard(self.delete_dialog), actions)
         self.layout.addLayout(actions)
         self.loading = False
+
+    def assign_template(self, identifier):
+        row = next(a for a in self.catalog["article"] if a["id"] == self.selected[1])
+        self.run_relation(
+            lambda: Templates(self.library.engine).assign(row["universe_id"], row["id"], identifier)
+        )
+
+    def manage_templates(self):
+        universes = self.catalog["universe"]
+        if not universes:
+            self.error("Сначала создайте вселенную")
+            return
+        labels = [f"{u['title']} · #{u['id']}" for u in universes]
+        chosen, ok = QInputDialog.getItem(self, "Типы и шаблоны", "Вселенная", labels, 0, False)
+        if not ok:
+            return
+        uid = universes[labels.index(chosen)]["id"]
+        templates = sorted(
+            [t for t in self.catalog["template"] if t["universe_id"] == uid],
+            key=lambda t: t["position"],
+        )
+        labels = [
+            f"{t['title']} · статей: {sum(a.get('template_id') == t['id'] for a in self.catalog['article'])}"
+            for t in templates
+        ] + ["＋ Новый тип"]
+        chosen, ok = QInputDialog.getItem(self, "Типы и шаблоны", "Тип", labels, 0, False)
+        if not ok:
+            return
+        index = labels.index(chosen)
+        template = (
+            templates[index]
+            if index < len(templates)
+            else {"title": "Новый тип", "definitions": [], "position": len(templates)}
+        )
+        dialog = TemplateDialog(
+            template, [a for a in self.catalog["article"] if a["universe_id"] == uid], self
+        )
+        if not dialog.exec():
+            return
+        position, ok = QInputDialog.getInt(
+            self, "Порядок типов", "Позиция (с нуля)", template["position"], 0, 10000
+        )
+        if not ok:
+            return
+        definitions = [editor.read() for editor in dialog.definitions]
+        title = dialog.title.text()
+
+        def operation():
+            service = Templates(self.library.engine)
+            if "id" in template:
+                return service.save(uid, template["id"], title, definitions, position)
+            # Validate and create atomically using the same service operation.
+            return service.create_with_fields(uid, title, definitions, position)
+
+        self.setEnabled(False)
+
+        def done(_):
+            self.selected = None
+            self.refresh()
+
+        def failed(message):
+            self.setEnabled(True)
+            self.error(message)
+
+        self.jobs.submit(operation, done, failed)
 
     def create_relation(self):
         source_id = self.selected[1]
@@ -523,6 +600,17 @@ class MainWindow(QMainWindow):
         title, ok = QInputDialog.getText(self, "Создать " + NAMES[kind].lower(), "Название")
         if not ok:
             return
+        chosen_template = None
+        if kind == "article":
+            templates = [t for t in self.catalog.get("template", []) if t["universe_id"] == parent]
+            if templates:
+                labels = [t["title"] for t in templates]
+                selected, accepted = QInputDialog.getItem(
+                    self, "Новая статья", "Тип", labels, 0, False
+                )
+                if not accepted:
+                    return
+                chosen_template = templates[labels.index(selected)]["id"]
         self.setEnabled(False)
 
         def success(row):
@@ -530,7 +618,9 @@ class MainWindow(QMainWindow):
                 self.setEnabled(True)
                 self.refresh((kind, row["id"]))
 
-            if preset_kind:
+            if chosen_template is not None:
+                done()
+            elif preset_kind:
                 self.jobs.submit(
                     lambda: self.library.update(kind, row["id"], {"kind": preset_kind}),
                     done,
@@ -543,7 +633,12 @@ class MainWindow(QMainWindow):
             self.setEnabled(True)
             self.error(message)
 
-        self.jobs.submit(lambda: self.library.create(kind, title, parent), success, failure)
+        def operation():
+            if chosen_template is not None:
+                return Templates(self.library.engine).create_article(parent, title, chosen_template)
+            return self.library.create(kind, title, parent)
+
+        self.jobs.submit(operation, success, failure)
 
     def delete_dialog(self):
         if not self.selected:
@@ -618,6 +713,7 @@ class MainWindow(QMainWindow):
         self.crumbs.setText("Библиотека  /  Настройки")
         self.heading("Настройки и данные", "Локальное хранение без обязательных облачных сервисов.")
         self.layout.addWidget(QLabel("База данных: " + str(self.library.engine.url.database)))
+        self._button("Типы и шаблоны", self.manage_templates, self.layout)
         for export, label in ((False, "Создать резервную копию"), (True, "Экспортировать JSON")):
             self._button(label, lambda _=False, e=export: self.file_operation(e), self.layout)
         self.layout.addStretch()
