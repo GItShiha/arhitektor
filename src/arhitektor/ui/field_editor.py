@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -22,6 +21,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from arhitektor.ui.numbers import DecimalSpinBox
+from arhitektor.ui.wheel import route_property_wheels
+
 
 def scroll_area(content: QWidget) -> QScrollArea:
     scroll = QScrollArea()
@@ -29,6 +31,7 @@ def scroll_area(content: QWidget) -> QScrollArea:
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setFrameShape(QScrollArea.Shape.NoFrame)
     scroll.setWidget(content)
+    route_property_wheels(scroll)
     return scroll
 
 
@@ -130,8 +133,7 @@ class ValueCard(QWidget):
                 editor.setValue(value)
                 editor.valueChanged.connect(self.edit_value)
             else:
-                editor = QDoubleSpinBox()
-                editor.setDecimals(15)
+                editor = DecimalSpinBox()
                 editor.setRange(-1.7976931348623157e308, 1.7976931348623157e308)
                 editor.setValue(value)
                 editor.valueChanged.connect(self.edit_value)
@@ -174,7 +176,7 @@ class ValueCard(QWidget):
             return deepcopy(self.original)
         if isinstance(self.editor, QCheckBox):
             return self.editor.isChecked()
-        if isinstance(self.editor, (QSpinBox, QDoubleSpinBox)):
+        if isinstance(self.editor, (QSpinBox, DecimalSpinBox)):
             return self.editor.value()
         if isinstance(self.editor, QTextEdit):
             return self.editor.toPlainText()

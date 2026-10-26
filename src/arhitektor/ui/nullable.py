@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QCalendarWidget,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLineEdit,
     QSpinBox,
@@ -17,6 +16,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from arhitektor.ui.numbers import DecimalSpinBox
 
 
 class EmptyDisplay:
@@ -60,14 +61,14 @@ class EmptySpinBox(EmptyDisplay, QSpinBox):
             self.valueChanged.emit(self.value())
 
 
-class EmptyDoubleSpinBox(EmptyDisplay, QDoubleSpinBox):
+class EmptyDoubleSpinBox(EmptyDisplay, DecimalSpinBox):
     def textFromValue(self, value):
         return "" if self._empty else super().textFromValue(value)
 
     def setValue(self, value):
         was_empty = self._empty
         self._empty = False
-        previous = self.value()
+        previous = self._value
         super().setValue(value)
         if was_empty and previous == self.value():
             self.lineEdit().setText(self.textFromValue(self.value()))
@@ -85,6 +86,7 @@ class EmptyDateEdit(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setProperty("propertyWheelControl", True)
         self._format = "dd.MM.yyyy"
         self._line = QLineEdit(self)
         self._line.setPlaceholderText("Не указано · дд.мм.гггг")

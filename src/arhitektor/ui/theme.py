@@ -5,7 +5,7 @@ QLabel#brand { color: #9cb6dd; font-size: 15px; font-weight: 700; letter-spacing
 QLabel#eyebrow { color: #93a6c1; font-size: 12px; font-weight: 600; }
 QLabel#heading { color: #f2f4f8; font-size: 27px; font-weight: 650; margin-bottom: 8px; }
 QLabel#subtitle { color: #a9b4c5; }
-QTreeWidget, QListWidget, QTableWidget, QPlainTextEdit, QTextEdit, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+QTreeWidget, QListWidget, QTableWidget, QPlainTextEdit, QTextEdit, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox {
  background: #202631; border: 1px solid #353f4e; border-radius: 5px; padding: 7px;
  selection-background-color: #405b80;
 }
