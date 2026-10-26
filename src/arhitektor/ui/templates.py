@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from PySide6.QtCore import QDate, Signal
+from PySide6.QtCore import QDate, QSignalBlocker, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,12 +30,15 @@ class TypedValue(QWidget):
         self.definition = definition
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 8)
-        label = QLabel(definition["name"])
+        label = QLabel(
+            definition["name"]
+            + ("\nДополнительное многострочное поле" if definition["kind"] == "long" else "")
+        )
         label.setWordWrap(True)
         layout.addWidget(label)
-        self.enabled = QCheckBox("Значение задано")
-        self.enabled.setChecked(value is not None)
-        layout.addWidget(self.enabled)
+        self.present = value is not None
+        self.state = QLabel("" if self.present else "Не указано")
+        layout.addWidget(self.state)
         kind = definition["kind"]
         self.kind = kind
         if kind == "date":
@@ -46,14 +49,20 @@ class TypedValue(QWidget):
             self.editor.setDate(
                 QDate.fromString(value, "yyyy-MM-dd") if value else QDate.currentDate()
             )
-            self.editor.dateChanged.connect(self.changed)
-        elif kind in ("choice", "reference"):
+            self.editor.dateChanged.connect(self.mark_edited)
+            self.editor.calendarWidget().clicked.connect(self.mark_edited)
+            self.editor.lineEdit().textEdited.connect(self.mark_edited)
+        elif kind in ("choice", "reference", "bool"):
             self.editor = QComboBox()
             self.editor.setMinimumWidth(0)
             self.editor.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
-            if kind == "choice":
+            self.editor.addItem("Не указано", None)
+            if kind == "bool":
+                self.editor.addItem("Да", True)
+                self.editor.addItem("Нет", False)
+            elif kind == "choice":
                 for option in definition.get("options", []):
                     self.editor.addItem(option, option)
             else:
@@ -64,7 +73,7 @@ class TypedValue(QWidget):
                 self.editor.addItem("Недоступное значение", value)
                 index = self.editor.count() - 1
             self.editor.setCurrentIndex(max(0, index))
-            self.editor.currentIndexChanged.connect(self.changed)
+            self.editor.currentIndexChanged.connect(self.mark_edited)
         else:
             sample = {"text": "", "long": "", "int": 0, "float": 0.0, "bool": False}[kind]
             initial = value if value is not None else sample
@@ -76,29 +85,58 @@ class TypedValue(QWidget):
             self.editor = self.card.editor
             self.card.layout.removeWidget(self.editor)
             self.editor.setParent(self)
-            self.card.changed.connect(self.changed)
+            self.card.changed.connect(self.mark_edited)
+            if hasattr(self.editor, "lineEdit"):
+                self.editor.lineEdit().textEdited.connect(self.mark_edited)
             self.card.hide()
         layout.addWidget(self.editor)
-        self.editor.setEnabled(value is not None)
-        self.enabled.toggled.connect(self.editor.setEnabled)
-        self.enabled.toggled.connect(self.changed)
+        self.clear_button = QPushButton("Очистить")
+        self.clear_button.clicked.connect(self.clear_value)
+        layout.addWidget(self.clear_button)
         if kind == "reference":
             button = QPushButton("Перейти к статье")
             button.clicked.connect(
                 lambda: (
                     self.open_requested.emit(self.editor.currentData())
-                    if self.enabled.isChecked() and self.editor.currentData() is not None
+                    if self.present and self.editor.currentData() is not None
                     else None
                 )
             )
             layout.addWidget(button)
 
+    def mark_edited(self, *_args):
+        self.present = (
+            self.editor.currentData() is not None
+            if self.kind in ("bool", "choice", "reference")
+            else True
+        )
+        self.state.setText("" if self.present else "Не указано")
+        if hasattr(self, "card"):
+            self.card.value_dirty = True
+        self.changed.emit()
+
+    def clear_value(self):
+        with QSignalBlocker(self.editor):
+            if self.kind in ("bool", "choice", "reference"):
+                self.editor.setCurrentIndex(0)
+            elif self.kind == "date":
+                self.editor.setDate(QDate.currentDate())
+            elif hasattr(self.editor, "setValue"):
+                self.editor.setValue(0)
+            elif hasattr(self.editor, "setPlainText"):
+                self.editor.setPlainText("")
+            else:
+                self.editor.setText("")
+        self.present = False
+        self.state.setText("Не указано")
+        self.changed.emit()
+
     def read(self):
-        if not self.enabled.isChecked():
+        if not self.present:
             return None
         if self.kind == "date":
             return self.editor.date().toString("yyyy-MM-dd")
-        if self.kind in ("choice", "reference"):
+        if self.kind in ("choice", "reference", "bool"):
             return self.editor.currentData()
         return self.card.read()
 

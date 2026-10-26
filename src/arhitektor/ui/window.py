@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         self.view_section = "Обзор"
         self.view_universe = None
         self.settings = QSettings("Arhitektor", "Arhitektor")
+        self.filter_restored = False
         self.setWindowTitle("Архитектор — мастерская писателя")
         self.resize(1340, 820)
         self.timer = QTimer(self)
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
         self.nav.create_requested.connect(self.create_dialog)
         self.nav.settings_requested.connect(lambda: self.transition(self.show_settings))
         self.nav.back_requested.connect(self.back)
+        self.nav.templates_requested.connect(lambda: self.guard(self.manage_templates))
         self.split.addWidget(self.nav)
         self.page = QWidget()
         outer = QVBoxLayout(self.page)
@@ -122,6 +124,13 @@ class MainWindow(QMainWindow):
         def ready(catalog):
             self.catalog = catalog
             self.nav.update_universes(catalog["universe"])
+            if not self.filter_restored:
+                uid = self.settings.value("universe_filter", "")
+                uid = int(uid) if str(uid).isdigit() else None
+                self.nav.universe.blockSignals(True)
+                self.nav.universe.setCurrentIndex(max(0, self.nav.universe.findData(uid)))
+                self.nav.universe.blockSignals(False)
+                self.filter_restored = True
             if selected:
                 self.nav.select_section(self.nav.section_for(selected[0]))
             self.nav.populate(catalog, selected)
@@ -325,6 +334,8 @@ class MainWindow(QMainWindow):
             self.heading("Сцена", work["title"] if work else "")
         self._line("title", row["title"], "Название")
         text_key = "content" if kind in ("article", "scene") else "description"
+        if kind == "article":
+            self.layout.addWidget(QLabel("Основное описание"))
         self.editor = QPlainTextEdit(row[text_key])
         self.editor.setPlaceholderText("Начните писать…")
         self.editor.setObjectName("manuscript" if kind == "scene" else "content")
@@ -406,11 +417,13 @@ class MainWindow(QMainWindow):
         if not universes:
             self.error("Сначала создайте вселенную")
             return
-        labels = [f"{u['title']} · #{u['id']}" for u in universes]
-        chosen, ok = QInputDialog.getItem(self, "Типы и шаблоны", "Вселенная", labels, 0, False)
-        if not ok:
-            return
-        uid = universes[labels.index(chosen)]["id"]
+        uid = self.nav.universe_id
+        if uid is None:
+            labels = [f"{u['title']} · #{u['id']}" for u in universes]
+            chosen, ok = QInputDialog.getItem(self, "Типы и шаблоны", "Вселенная", labels, 0, False)
+            if not ok:
+                return
+            uid = universes[labels.index(chosen)]["id"]
         templates = sorted(
             [t for t in self.catalog["template"] if t["universe_id"] == uid],
             key=lambda t: t["position"],
@@ -579,6 +592,8 @@ class MainWindow(QMainWindow):
             if not ok:
                 return
             kind = next(key for key, value in NAMES.items() if value == label)
+        if kind == "article" and parent is None:
+            parent = self.nav.universe_id
         if kind in ("article", "scene", "work") and parent is None:
             parent_kind = "work" if kind == "scene" else "universe"
             rows = self.catalog[parent_kind]
@@ -764,6 +779,9 @@ class MainWindow(QMainWindow):
                 self.split.saveState()
                 if not self.focus_mode and not self.props.isHidden()
                 else (self.normal_splitter_state or self.split.saveState())
+            )
+            self.settings.setValue(
+                "universe_filter", self.nav.universe_id if self.nav.universe_id is not None else ""
             )
             self.settings.setValue("splitter", state)
             self.settings.setValue(
