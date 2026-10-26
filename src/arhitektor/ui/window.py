@@ -24,10 +24,16 @@ from PySide6.QtWidgets import (
 from arhitektor.relations import Relations
 from arhitektor.services import Library, count_words
 from arhitektor.templates import Templates
+from arhitektor.ui.field_editor import scroll_area
 from arhitektor.ui.jobs import Jobs
 from arhitektor.ui.navigation import NavigationPanel
 from arhitektor.ui.properties import FieldEditor, PropertiesPanel
-from arhitektor.ui.relations import RelatedObjects, RelationDialog
+from arhitektor.ui.relations import (
+    DeleteRelationsDialog,
+    RelatedObjects,
+    RelationDialog,
+    related_rows,
+)
 from arhitektor.ui.templates import TemplateDialog
 
 NAMES = {"universe": "Вселенная", "article": "Статья", "work": "Произведение", "scene": "Сцена"}
@@ -84,7 +90,8 @@ class MainWindow(QMainWindow):
         self.body = QWidget()
         self.layout = QVBoxLayout(self.body)
         self.layout.setContentsMargins(0, 8, 0, 0)
-        outer.addWidget(self.body, 1)
+        self.body_scroll = scroll_area(self.body)
+        outer.addWidget(self.body_scroll, 1)
         self.split.addWidget(self.page)
         self.props = PropertiesPanel()
         self.props.changed.connect(self.changed)
@@ -341,24 +348,29 @@ class MainWindow(QMainWindow):
         self.editor.setObjectName("manuscript" if kind == "scene" else "content")
         self.editor.textChanged.connect(self.changed)
         self.fields[text_key] = self.editor
+        if kind == "article":
+            self.editor.setMinimumHeight(220)
         self.layout.addWidget(self.editor, 1)
         self.counter = QLabel()
         self.layout.addWidget(self.counter)
         self.update_counter()
         if kind == "article":
-            for compact in (False, True):
-                related = RelatedObjects(row["id"], self.catalog, compact)
-                related.open_requested.connect(
-                    lambda identifier: self.navigate(("article", identifier))
-                )
-                related.create_requested.connect(lambda: self.guard(self.create_relation))
-                related.delete_requested.connect(
-                    lambda identifier: self.guard(lambda: self.delete_relation(identifier))
-                )
-                if compact:
-                    self.props.layout.insertWidget(self.props.layout.count() - 1, related)
-                else:
-                    self.layout.addWidget(related)
+            related = RelatedObjects(row["id"], self.catalog)
+            related.open_requested.connect(
+                lambda identifier: self.navigate(("article", identifier))
+            )
+            related.create_requested.connect(lambda: self.guard(self.create_relation))
+            related.remove_requested.connect(lambda: self.guard(self.delete_relations))
+            self.layout.addWidget(related)
+            summary = QWidget()
+            summary_layout = QVBoxLayout(summary)
+            summary_layout.addWidget(QLabel(f"Связей: {len(related.model.rows)}"))
+            self._button(
+                "К списку связей",
+                lambda: self.body_scroll.ensureWidgetVisible(related.search),
+                summary_layout,
+            )
+            self.props.layout.insertWidget(self.props.layout.count() - 1, summary)
         if kind == "universe":
             articles = [a for a in self.catalog["article"] if a["universe_id"] == row["id"]]
             works = [w for w in self.catalog["work"] if w["universe_id"] == row["id"]]
@@ -488,16 +500,35 @@ class MainWindow(QMainWindow):
                 lambda: Relations(self.library.engine).create(source_id, target, label, reverse)
             )
 
-    def delete_relation(self, identifier):
-        answer = QMessageBox.question(
-            self,
-            "Удалить связь?",
-            "Статьи сохранятся. Удалить эту связь?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self.run_relation(lambda: Relations(self.library.engine).delete(identifier))
+    def delete_relations(self):
+        article_id = self.selected[1]
+        dialog = DeleteRelationsDialog(related_rows(article_id, self.catalog), self)
+
+        def remove(identifiers):
+            if not identifiers or dialog.busy:
+                return
+            dialog.set_busy(True)
+
+            def done(_):
+                # Publish the entire committed change at once, without a second DB read.
+                removed = set(identifiers)
+                self.catalog["relation"] = [
+                    r for r in self.catalog["relation"] if r["id"] not in removed
+                ]
+                row = next(a for a in self.catalog["article"] if a["id"] == article_id)
+                self.render("article", row)
+                dialog.accept()
+                self.statusBar().showMessage(f"Удалено связей: {len(removed)}")
+
+            self.jobs.submit(
+                lambda: Relations(self.library.engine).delete_many(article_id, identifiers),
+                done,
+                dialog.show_error,
+            )
+
+        dialog.delete_requested.connect(remove)
+        dialog.exec()
+        dialog.deleteLater()
 
     def run_relation(self, operation):
         target = self.selected
