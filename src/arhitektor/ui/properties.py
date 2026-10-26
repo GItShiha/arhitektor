@@ -1,109 +1,16 @@
 """Editable contextual metadata without raw JSON inputs."""
 
-from typing import Any
-
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-
-class FieldEditor(QWidget):
-    changed = Signal()
-
-    def __init__(self, fields: dict[str, Any], parent=None):
-        super().__init__(parent)
-        self.original = fields.copy()
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Поле", "Значение", "Тип"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setMinimumHeight(155)
-        self.table.cellChanged.connect(lambda *_: self.changed.emit())
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.table)
-        row = QHBoxLayout()
-        add = QPushButton("＋ Поле")
-        add.clicked.connect(self.add)
-        remove = QPushButton("Удалить поле")
-        remove.clicked.connect(self.remove)
-        row.addWidget(add)
-        row.addWidget(remove)
-        layout.addLayout(row)
-        for key, value in fields.items():
-            self.add(key, value, notify=False)
-
-    def add(self, key="", value="", notify=True):
-        index = self.table.rowCount()
-        self.table.insertRow(index)
-        self.table.setItem(index, 0, QTableWidgetItem(str(key)))
-        complex_value = isinstance(value, (dict, list))
-        self.table.setItem(
-            index,
-            1,
-            QTableWidgetItem(
-                "Сложное значение · сохранится без изменений" if complex_value else str(value)
-            ),
-        )
-        if complex_value:
-            item = self.table.item(index, 1)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        types = QComboBox()
-        for label, code in (
-            ("Текст", "str"),
-            ("Число", "number"),
-            ("Да / нет", "bool"),
-            ("Сложное", "complex"),
-        ):
-            types.addItem(label, code)
-        selected = (
-            "complex"
-            if complex_value
-            else "bool"
-            if isinstance(value, bool)
-            else ("number" if isinstance(value, (int, float)) else "str")
-        )
-        types.setCurrentIndex(types.findData(selected))
-        types.setEnabled(not complex_value)
-        types.currentIndexChanged.connect(lambda _: self.changed.emit())
-        self.table.setCellWidget(index, 2, types)
-        if notify:
-            self.changed.emit()
-
-    def remove(self):
-        row = self.table.currentRow()
-        if row >= 0:
-            self.table.removeRow(row)
-            self.changed.emit()
-
-    def read(self) -> dict[str, Any]:
-        result = {}
-        for row in range(self.table.rowCount()):
-            key = self.table.item(row, 0).text().strip()
-            if not key:
-                raise ValueError("Укажите название дополнительного поля")
-            if key in result:
-                raise ValueError(f"Поле «{key}» повторяется")
-            raw = self.table.item(row, 1).text().strip()
-            kind = self.table.cellWidget(row, 2).currentData()
-            if kind == "complex":
-                result[key] = self.original[key]
-            elif kind == "number":
-                result[key] = float(raw) if "." in raw else int(raw)
-            elif kind == "bool":
-                result[key] = raw.casefold() in ("true", "да", "1", "yes")
-            else:
-                result[key] = raw
-        return result
+from arhitektor.ui.field_editor import FieldEditor, scroll_area
 
 
 class PropertiesPanel(QWidget):
@@ -111,9 +18,14 @@ class PropertiesPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(245)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(18, 20, 18, 18)
+        self.setMinimumWidth(330)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        self.layout = QVBoxLayout(content)
+        self.layout.setContentsMargins(14, 18, 14, 18)
+        self.scroll = scroll_area(content)
+        outer.addWidget(self.scroll)
         self.form = None
         self.fields: dict[str, QWidget] = {}
 
@@ -124,6 +36,8 @@ class PropertiesPanel(QWidget):
         self.layout.addWidget(heading)
         form_widget = QWidget()
         self.form = QFormLayout(form_widget)
+        self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.layout.addWidget(form_widget)
         self._static(
             "Объект",

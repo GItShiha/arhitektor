@@ -1,5 +1,4 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QTableWidgetItem
 
 from arhitektor.ui.properties import FieldEditor
 from arhitektor.ui.window import MainWindow
@@ -54,7 +53,7 @@ def test_fields_preserve_nested_and_edit_without_json(qtbot, library):
     wait_selected(qtbot, window, ("article", article["id"]))
     fields = window.fields["fields"]
     assert isinstance(fields, FieldEditor)
-    fields.table.setItem(0, 1, QTableWidgetItem("21"))
+    fields.cards[0].editor.setValue(21)
     fields.add("Прозвище", "Ворон")
     window.save()
     qtbot.waitUntil(lambda: not window.dirty)
