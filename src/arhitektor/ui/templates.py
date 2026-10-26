@@ -6,19 +6,21 @@ from PySide6.QtCore import QDate, QSignalBlocker, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDateEdit,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from arhitektor.templates import KINDS
 from arhitektor.ui.field_editor import FieldEditor, GrowingTextEdit, ValueCard, scroll_area
+from arhitektor.ui.nullable import EmptyDateEdit, EmptyDoubleSpinBox, EmptySpinBox
 
 
 class TypedValue(QWidget):
@@ -37,20 +39,16 @@ class TypedValue(QWidget):
         label.setWordWrap(True)
         layout.addWidget(label)
         self.present = value is not None
-        self.state = QLabel("" if self.present else "Не указано")
-        layout.addWidget(self.state)
         kind = definition["kind"]
         self.kind = kind
         if kind == "date":
-            self.editor = QDateEdit()
+            self.editor = EmptyDateEdit()
             self.editor.setDateRange(QDate(1, 1, 1), QDate(9999, 12, 31))
             self.editor.setCalendarPopup(True)
             self.editor.setDisplayFormat("dd.MM.yyyy")
-            self.editor.setDate(
-                QDate.fromString(value, "yyyy-MM-dd") if value else QDate.currentDate()
-            )
+            if value is not None:
+                self.editor.setDate(QDate.fromString(value, "yyyy-MM-dd"))
             self.editor.dateChanged.connect(self.mark_edited)
-            self.editor.calendarWidget().clicked.connect(self.mark_edited)
             self.editor.lineEdit().textEdited.connect(self.mark_edited)
         elif kind in ("choice", "reference", "bool"):
             self.editor = QComboBox()
@@ -83,12 +81,25 @@ class TypedValue(QWidget):
             if kind in ("text", "long"):
                 self.card.kind.setCurrentIndex(self.card.kind.findData(kind))
             self.editor = self.card.editor
+            if isinstance(self.editor, (QSpinBox, QDoubleSpinBox)):
+                old = self.editor
+                editor = EmptyDoubleSpinBox() if isinstance(old, QDoubleSpinBox) else EmptySpinBox()
+                if isinstance(old, QDoubleSpinBox):
+                    editor.setDecimals(old.decimals())
+                editor.setRange(old.minimum(), old.maximum())
+                editor.setValue(old.value())
+                self.card.layout.removeWidget(old)
+                old.deleteLater()
+                self.editor = self.card.editor = editor
+                editor.valueChanged.connect(self.card.edit_value)
             self.card.layout.removeWidget(self.editor)
             self.editor.setParent(self)
             self.card.changed.connect(self.mark_edited)
             if hasattr(self.editor, "lineEdit"):
                 self.editor.lineEdit().textEdited.connect(self.mark_edited)
             self.card.hide()
+        if value is None and hasattr(self.editor, "set_empty"):
+            self.editor.set_empty()
         layout.addWidget(self.editor)
         self.clear_button = QPushButton("Очистить")
         self.clear_button.clicked.connect(self.clear_value)
@@ -110,7 +121,8 @@ class TypedValue(QWidget):
             if self.kind in ("bool", "choice", "reference")
             else True
         )
-        self.state.setText("" if self.present else "Не указано")
+        if hasattr(self.editor, "set_empty"):
+            self.editor.set_empty(False)
         if hasattr(self, "card"):
             self.card.value_dirty = True
         self.changed.emit()
@@ -119,22 +131,23 @@ class TypedValue(QWidget):
         with QSignalBlocker(self.editor):
             if self.kind in ("bool", "choice", "reference"):
                 self.editor.setCurrentIndex(0)
-            elif self.kind == "date":
-                self.editor.setDate(QDate.currentDate())
-            elif hasattr(self.editor, "setValue"):
-                self.editor.setValue(0)
+            elif self.kind == "date" or hasattr(self.editor, "set_empty"):
+                self.editor.set_empty()
             elif hasattr(self.editor, "setPlainText"):
                 self.editor.setPlainText("")
             else:
                 self.editor.setText("")
         self.present = False
-        self.state.setText("Не указано")
         self.changed.emit()
 
     def read(self):
         if not self.present:
             return None
         if self.kind == "date":
+            if not self.editor.text():
+                return None
+            if not self.editor.date().isValid():
+                raise ValueError("Введите дату в формате дд.мм.гггг")
             return self.editor.date().toString("yyyy-MM-dd")
         if self.kind in ("choice", "reference", "bool"):
             return self.editor.currentData()
