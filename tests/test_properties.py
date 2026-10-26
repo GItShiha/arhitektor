@@ -1,8 +1,9 @@
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLineEdit, QSpinBox
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QLineEdit, QSpinBox
 
 from arhitektor.ui.field_editor import ComplexFieldDialog, FieldEditor, GrowingTextEdit
+from arhitektor.ui.numbers import DecimalSpinBox
 from arhitektor.ui.window import MainWindow
 
 
@@ -23,7 +24,7 @@ def test_typed_cards_and_exact_roundtrip(qtbot):
     assert fields.read() == values
     for card, cls in zip(
         fields.cards,
-        (QLineEdit, GrowingTextEdit, QSpinBox, QDoubleSpinBox, QCheckBox),
+        (QLineEdit, GrowingTextEdit, QSpinBox, DecimalSpinBox, QCheckBox),
         strict=False,
     ):
         assert isinstance(card.editor, cls)

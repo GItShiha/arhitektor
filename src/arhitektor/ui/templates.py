@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 from arhitektor.templates import KINDS
 from arhitektor.ui.field_editor import FieldEditor, GrowingTextEdit, ValueCard, scroll_area
 from arhitektor.ui.nullable import EmptyDateEdit, EmptyDoubleSpinBox, EmptySpinBox
+from arhitektor.ui.numbers import DecimalSpinBox
 
 
 class TypedValue(QWidget):
@@ -81,11 +81,9 @@ class TypedValue(QWidget):
             if kind in ("text", "long"):
                 self.card.kind.setCurrentIndex(self.card.kind.findData(kind))
             self.editor = self.card.editor
-            if isinstance(self.editor, (QSpinBox, QDoubleSpinBox)):
+            if isinstance(self.editor, (QSpinBox, DecimalSpinBox)):
                 old = self.editor
-                editor = EmptyDoubleSpinBox() if isinstance(old, QDoubleSpinBox) else EmptySpinBox()
-                if isinstance(old, QDoubleSpinBox):
-                    editor.setDecimals(old.decimals())
+                editor = EmptyDoubleSpinBox() if isinstance(old, DecimalSpinBox) else EmptySpinBox()
                 editor.setRange(old.minimum(), old.maximum())
                 editor.setValue(old.value())
                 self.card.layout.removeWidget(old)
