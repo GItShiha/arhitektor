@@ -1,14 +1,13 @@
-import json
+"""Main window: navigation, guarded transitions and serial persistence."""
+
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
-    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -18,14 +17,14 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from arhitektor.services import Library, count_words
 from arhitektor.ui.jobs import Jobs
+from arhitektor.ui.navigation import NavigationPanel
+from arhitektor.ui.properties import FieldEditor, PropertiesPanel
 
 NAMES = {"universe": "Вселенная", "article": "Статья", "work": "Произведение", "scene": "Сцена"}
 
@@ -38,50 +37,75 @@ class MainWindow(QMainWindow):
         self.selected: tuple[str, int] | None = None
         self.catalog: dict[str, list[dict[str, Any]]] = {}
         self.fields: dict[str, Any] = {}
+        self.history: list[tuple[str, tuple[str, int] | None, int | None]] = []
         self.revision = 0
-        self.dirty = False
-        self.loading = False
-        self.saving = False
-        self.closing = False
+        self.dirty = self.saving = self.closing = self.loading = False
+        self.focus_mode = False
+        self.properties_before_focus = True
+        self.view_section = "Обзор"
+        self.view_universe = None
+        self.settings = QSettings("Arhitektor", "Arhitektor")
         self.setWindowTitle("Архитектор — мастерская писателя")
-        self.resize(1180, 780)
+        self.resize(1340, 820)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(700)
         self.timer.timeout.connect(self.save)
-        split = QSplitter()
-        self.setCentralWidget(split)
-        left = QWidget()
-        navigation = QVBoxLayout(left)
-        heading = QLabel("Архитектор")
-        heading.setObjectName("heading")
-        navigation.addWidget(heading)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.currentItemChanged.connect(self.choose)
-        navigation.addWidget(self.tree)
-        add = QPushButton("＋ Создать")
-        add.clicked.connect(self.create_dialog)
-        navigation.addWidget(add)
-        settings = QPushButton("Настройки и данные")
-        settings.clicked.connect(lambda: self.guard(self.show_settings))
-        navigation.addWidget(settings)
-        split.addWidget(left)
+        self.split = QSplitter()
+        self.setCentralWidget(self.split)
+        self.nav = NavigationPanel()
+        self.nav.target_requested.connect(lambda target: self.navigate(target))
+        self.nav.section_requested.connect(self.open_section)
+        self.nav.universe_requested.connect(self.open_universe)
+        self.nav.create_requested.connect(self.create_dialog)
+        self.nav.settings_requested.connect(lambda: self.transition(self.show_settings))
+        self.nav.back_requested.connect(self.back)
+        self.split.addWidget(self.nav)
         self.page = QWidget()
-        self.layout = QVBoxLayout(self.page)
-        split.addWidget(self.page)
-        split.setSizes([280, 900])
+        outer = QVBoxLayout(self.page)
+        outer.setContentsMargins(28, 18, 28, 22)
+        toolbar = QHBoxLayout()
+        self.crumbs = QLabel("Библиотека")
+        self.crumbs.setObjectName("eyebrow")
+        toolbar.addWidget(self.crumbs, 1)
+        self.props_toggle = QPushButton("Скрыть свойства")
+        self.props_toggle.clicked.connect(self.toggle_properties)
+        toolbar.addWidget(self.props_toggle)
+        self.focus_button = QPushButton("Режим письма")
+        self.focus_button.clicked.connect(self.toggle_focus)
+        toolbar.addWidget(self.focus_button)
+        outer.addLayout(toolbar)
+        self.body = QWidget()
+        self.layout = QVBoxLayout(self.body)
+        self.layout.setContentsMargins(0, 8, 0, 0)
+        outer.addWidget(self.body, 1)
+        self.split.addWidget(self.page)
+        self.props = PropertiesPanel()
+        self.props.changed.connect(self.changed)
+        self.split.addWidget(self.props)
+        self.split.setStretchFactor(1, 1)
+        self.normal_splitter_state = None
+        state = self.settings.value("splitter")
+        if state:
+            self.split.restoreState(state)
+        else:
+            self.split.setSizes([260, 790, 290])
+        self.props.setVisible(self.settings.value("properties_visible", True, type=bool))
+        self.props_toggle.setText(
+            "Скрыть свойства" if not self.props.isHidden() else "Показать свойства"
+        )
         action = QAction("Сохранить", self)
         action.setShortcut(QKeySequence.StandardKey.Save)
         action.triggered.connect(self.save)
         self.addAction(action)
-        self.statusBar().showMessage("Загрузка библиотеки…")
         self.refresh()
 
-    def error(self, message: str):
-        self.statusBar().showMessage(
-            "Операция не выполнена. Несохранённый текст остаётся в редакторе."
-        )
+    @property
+    def tree(self):  # Compatibility for callers using the former tree attribute.
+        return self.nav.tree
+
+    def error(self, message):
+        self.statusBar().showMessage("Операция не выполнена; изменения остаются в редакторе")
         QMessageBox.critical(self, "Не удалось выполнить операцию", message)
 
     def refresh(self, selected=None):
@@ -89,41 +113,16 @@ class MainWindow(QMainWindow):
 
         def ready(catalog):
             self.catalog = catalog
-            self.tree.blockSignals(True)
-            self.tree.clear()
-            universe_root = QTreeWidgetItem(self.tree, ["Вселенные"])
-            work_root = QTreeWidgetItem(self.tree, ["Произведения"])
-            universe_nodes = {}
-            work_nodes = {}
-            selected_item = None
-            for kind, root, parents in (
-                ("universe", universe_root, universe_nodes),
-                ("work", work_root, work_nodes),
-            ):
-                for row in catalog[kind]:
-                    node = QTreeWidgetItem(root, [row["title"]])
-                    node.setData(0, Qt.ItemDataRole.UserRole, (kind, row["id"]))
-                    parents[row["id"]] = node
-                    if selected == (kind, row["id"]):
-                        selected_item = node
-            for kind, parent_key, parents in (
-                ("article", "universe_id", universe_nodes),
-                ("scene", "work_id", work_nodes),
-            ):
-                for row in catalog[kind]:
-                    node = QTreeWidgetItem(parents[row[parent_key]], [row["title"]])
-                    node.setData(0, Qt.ItemDataRole.UserRole, (kind, row["id"]))
-                    if selected == (kind, row["id"]):
-                        selected_item = node
-            self.tree.expandAll()
-            self.tree.setCurrentItem(selected_item)
-            self.tree.blockSignals(False)
+            self.nav.update_universes(catalog["universe"])
+            if selected:
+                self.nav.select_section(self.nav.section_for(selected[0]))
+            self.nav.populate(catalog, selected)
             if selected:
                 self.load(selected)
             else:
                 self.setEnabled(True)
                 if self.selected is None:
-                    self.welcome()
+                    self.show_section_page()
             self.statusBar().showMessage("Библиотека загружена")
 
         def failed(message):
@@ -135,34 +134,129 @@ class MainWindow(QMainWindow):
     def clear(self):
         self.loading = True
         self.fields = {}
+        self.props.clear()
         while self.layout.count():
             item = self.layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.loading = False
 
+    def heading(self, title, subtitle=""):
+        label = QLabel(title)
+        label.setObjectName("heading")
+        self.layout.addWidget(label)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("subtitle")
+            sub.setWordWrap(True)
+            self.layout.addWidget(sub)
+
     def welcome(self):
+        self.show_section_page()
+
+    def show_section_page(self):
+        self.selected = None
         self.clear()
-        self.layout.addWidget(QLabel("Ваша следующая история начинается здесь"))
-        self.layout.addWidget(
-            QLabel(
-                "Создайте произведение или вселенную кнопкой «＋ Создать».\n"
-                "Разрабатывать энциклопедию заранее необязательно."
+        section = self.nav.section
+        self.view_section = section
+        self.view_universe = self.nav.universe_id
+        self.crumbs.setText("Библиотека  /  " + section)
+        if section == "Обзор":
+            uid = self.nav.universe_id
+            if uid is not None:
+                self.load(("universe", uid))
+                return
+            self.heading(
+                "Мастерская писателя", "Выберите вселенную или начните работу над произведением."
             )
-        )
+            self.layout.addWidget(
+                QLabel(
+                    f"Вселенных: {len(self.catalog.get('universe', []))}   ·   "
+                    f"Произведений: {len(self.catalog.get('work', []))}"
+                )
+            )
+        else:
+            self.heading(section, "Выберите объект в списке слева или создайте новый.")
+            if section == "Произведения":
+                rows = self.catalog.get("work", [])
+                if self.nav.universe_id is not None:
+                    rows = [r for r in rows if r["universe_id"] == self.nav.universe_id]
+                self.layout.addWidget(QLabel(f"Произведений: {len(rows)}"))
         self.layout.addStretch()
 
-    def choose(self, current, _previous):
-        target = current.data(0, Qt.ItemDataRole.UserRole) if current else None
-        if target and target != self.selected:
-            self.guard(lambda: self.load(target))
+    def _location(self):
+        return self.nav.section, self.selected, self.nav.universe_id
+
+    def transition(self, action):
+        previous = self._location()
+
+        def proceed():
+            self.history.append(previous)
+            action()
+
+        self.guard(proceed)
+
+    def navigate(self, target, remember=True):
+        if target == self.selected:
+            return
+
+        def proceed():
+            if remember:
+                self.history.append(self._location())
+            self.nav.select_section(self.nav.section_for(target[0]))
+            self.nav.populate(self.catalog, target)
+            self.load(target)
+
+        self.guard(proceed)
+
+    def open_section(self, section):
+        self.nav.select_section(self.view_section)
+
+        def proceed():
+            self.history.append(self._location())
+            self.nav.select_section(section)
+            self.nav.populate(self.catalog)
+            self.show_section_page()
+
+        self.guard(proceed)
+
+    def open_universe(self, identifier):
+        self.nav.universe.blockSignals(True)
+        self.nav.universe.setCurrentIndex(max(0, self.nav.universe.findData(self.view_universe)))
+        self.nav.universe.blockSignals(False)
+
+        def proceed():
+            self.nav.universe.blockSignals(True)
+            self.nav.universe.setCurrentIndex(max(0, self.nav.universe.findData(identifier)))
+            self.nav.universe.blockSignals(False)
+            self.history.append(self._location())
+            self.nav.populate(self.catalog)
+            self.show_section_page()
+
+        self.guard(proceed)
+
+    def back(self):
+        if not self.history:
+            return
+
+        def proceed():
+            section, target, uid = self.history.pop()
+            self.nav.universe.blockSignals(True)
+            self.nav.universe.setCurrentIndex(max(0, self.nav.universe.findData(uid)))
+            self.nav.universe.blockSignals(False)
+            self.nav.select_section(section)
+            self.nav.populate(self.catalog, target)
+            if target:
+                self.load(target)
+            else:
+                self.show_section_page()
+
+        self.guard(proceed)
 
     def guard(self, continuation):
-        """Drain the editor before leaving it; errors keep the original editor visible."""
         if self.saving:
             QTimer.singleShot(50, lambda: self.guard(continuation))
-            return
-        if self.dirty:
+        elif self.dirty:
             self.save(after=continuation, lock=True)
         else:
             continuation()
@@ -173,6 +267,7 @@ class MainWindow(QMainWindow):
         def ready(row):
             self.selected = target
             self.dirty = False
+            self.nav.select_target(target)
             self.render(target[0], row)
             self.setEnabled(True)
 
@@ -182,72 +277,94 @@ class MainWindow(QMainWindow):
 
         self.jobs.submit(lambda: self.library.get(*target), ready, failed)
 
-    def render(self, kind: str, row: dict):
+    def _line(self, key, value, placeholder=""):
+        widget = QLineEdit(str(value))
+        widget.setPlaceholderText(placeholder)
+        widget.setObjectName(key)
+        widget.textChanged.connect(self.changed)
+        self.fields[key] = widget
+        self.layout.addWidget(widget)
+        return widget
+
+    def _button(self, text, callback, layout):
+        button = QPushButton(text)
+        button.clicked.connect(callback)
+        layout.addWidget(button)
+        return button
+
+    def render(self, kind, row):
         self.clear()
         self.loading = True
-        header = QLabel(NAMES[kind])
-        header.setObjectName("heading")
-        self.layout.addWidget(header)
-        form_widget = QWidget()
-        form = QFormLayout(form_widget)
-        self.layout.addWidget(form_widget)
-
-        def line(key, label):
-            widget = QLineEdit(str(row.get(key, "")))
-            widget.textChanged.connect(self.changed)
-            self.fields[key] = widget
-            form.addRow(label, widget)
-
-        line("title", "Название")
-        if kind in ("article", "work"):
-            line("kind", "Тип (можно свой)")
-        if kind == "work":
-            line("status", "Статус")
-            combo = QComboBox()
-            combo.addItem("Без вселенной", None)
-            for universe in self.catalog["universe"]:
-                combo.addItem(universe["title"], universe["id"])
-            combo.setCurrentIndex(max(0, combo.findData(row["universe_id"])))
-            combo.currentIndexChanged.connect(self.changed)
-            self.fields["universe_id"] = combo
-            form.addRow("Вселенная", combo)
-        if kind == "article":
-            row = dict(row, tags=", ".join(row["tags"]))
-            line("tags", "Теги через запятую")
-        if kind in ("universe", "article"):
-            key = "settings" if kind == "universe" else "fields"
-            widget = QLineEdit(json.dumps(row[key], ensure_ascii=False))
-            widget.textChanged.connect(self.changed)
-            self.fields[key] = widget
-            form.addRow("Настройки JSON" if kind == "universe" else "Доп. поля JSON", widget)
+        self.props.show_record(kind, row, self.catalog["universe"])
+        self.fields.update(self.props.fields)
+        self.view_section = self.nav.section
+        self.view_universe = self.nav.universe_id
+        self.crumbs.setText(f"{self.nav.section}  /  {row['title']}")
+        if kind == "universe":
+            self.heading("Обзор вселенной", "Один мир может объединять несколько произведений.")
+        elif kind == "article":
+            self.heading("Страница энциклопедии", row["kind"])
+        elif kind == "work":
+            self.heading("Рукопись", "Выберите сцену слева и продолжайте писать.")
+        else:
+            work = next((w for w in self.catalog["work"] if w["id"] == row["work_id"]), None)
+            self.heading("Сцена", work["title"] if work else "")
+        self._line("title", row["title"], "Название")
         text_key = "content" if kind in ("article", "scene") else "description"
         self.editor = QPlainTextEdit(row[text_key])
         self.editor.setPlaceholderText("Начните писать…")
-        self.editor.setMinimumHeight(220)
-        self.fields[text_key] = self.editor
+        self.editor.setObjectName("manuscript" if kind == "scene" else "content")
         self.editor.textChanged.connect(self.changed)
+        self.fields[text_key] = self.editor
         self.layout.addWidget(self.editor, 1)
         self.counter = QLabel()
         self.layout.addWidget(self.counter)
         self.update_counter()
-        buttons = QWidget()
-        actions = QHBoxLayout(buttons)
-        self.layout.addWidget(buttons)
-
-        def button(label, callback):
-            widget = QPushButton(label)
-            widget.clicked.connect(callback)
-            actions.addWidget(widget)
-
-        button("Сохранить · Ctrl+S", self.save)
         if kind == "universe":
-            button("Найти статью", self.search_dialog)
+            articles = [a for a in self.catalog["article"] if a["universe_id"] == row["id"]]
+            works = [w for w in self.catalog["work"] if w["universe_id"] == row["id"]]
+            self.layout.addWidget(
+                QLabel(f"Статей: {len(articles)}    ·    Произведений: {len(works)}")
+            )
+            recent = sorted([*articles, *works], key=lambda r: r["updated_at"], reverse=True)[:5]
+            self.layout.addWidget(QLabel("Недавно изменены"))
+            if recent:
+                for item in recent:
+                    target_kind = "article" if "fields" in item else "work"
+                    self._button(
+                        item["title"],
+                        lambda _=False, k=target_kind, i=item["id"]: self.navigate((k, i)),
+                        self.layout,
+                    )
+            else:
+                self.layout.addWidget(QLabel("Пока нет статей и произведений"))
+            actions = QHBoxLayout()
+            self._button("＋ Статья", lambda: self.create_dialog("article", row["id"]), actions)
+            self._button(
+                "＋ Персонаж", lambda: self.create_dialog("article", row["id"], "Персонаж"), actions
+            )
+            self._button("＋ Произведение", lambda: self.create_dialog("work", row["id"]), actions)
+            self.layout.addLayout(actions)
+        if kind == "work":
+            scenes = [s for s in self.catalog["scene"] if s["work_id"] == row["id"]]
+            self.layout.addWidget(QLabel(f"Сцен: {len(scenes)}"))
+            actions = QHBoxLayout()
+            for scene in scenes:
+                self._button(
+                    scene["title"],
+                    lambda _=False, i=scene["id"]: self.navigate(("scene", i)),
+                    actions,
+                )
+            self._button("＋ Сцена", lambda: self.create_dialog("scene", row["id"]), actions)
+            self.layout.addLayout(actions)
+        actions = QHBoxLayout()
+        self._button("Сохранить · Ctrl+S", self.save, actions)
         if kind == "scene":
-            button("↑ Раньше", lambda: self.guard(lambda: self.move(-1)))
-            button("↓ Позже", lambda: self.guard(lambda: self.move(1)))
+            self._button("↑ Раньше", lambda: self.guard(lambda: self.move(-1)), actions)
+            self._button("↓ Позже", lambda: self.guard(lambda: self.move(1)), actions)
         actions.addStretch()
-        button("Удалить", lambda: self.guard(self.delete_dialog))
-        self.layout.addWidget(QLabel("Изменено: " + str(row["updated_at"])[:19] + " UTC"))
+        self._button("Удалить", lambda: self.guard(self.delete_dialog), actions)
+        self.layout.addLayout(actions)
         self.loading = False
 
     def update_counter(self):
@@ -268,13 +385,13 @@ class MainWindow(QMainWindow):
         for key, widget in self.fields.items():
             if isinstance(widget, QPlainTextEdit):
                 value = widget.toPlainText()
-            elif isinstance(widget, QComboBox):
+            elif isinstance(widget, FieldEditor):
+                value = widget.read()
+            elif hasattr(widget, "currentData"):
                 value = widget.currentData()
             else:
                 value = widget.text()
-            if key in ("settings", "fields"):
-                value = json.loads(value)
-            elif key == "tags":
+            if key == "tags":
                 value = [tag.strip() for tag in value.split(",") if tag.strip()]
             values[key] = value
         return values
@@ -291,31 +408,25 @@ class MainWindow(QMainWindow):
             return
         try:
             values = self.values()
-        except (ValueError, TypeError) as error:
-            self.error("Проверьте JSON дополнительных полей: " + str(error))
+        except (ValueError, TypeError, KeyError) as error:
+            self.error("Проверьте дополнительные поля: " + str(error))
             return
         target, revision = self.selected, self.revision
         self.saving = True
         if lock:
             self.setEnabled(False)
 
-        def success(_row):
+        def success(row):
             self.saving = False
             self.setEnabled(True)
             if self.selected == target and self.revision == revision:
                 self.dirty = False
-                for row in self.catalog.get(target[0], []):
-                    if row["id"] == target[1]:
-                        row.update(_row)
-                iterator = self.tree.invisibleRootItem()
-
-                def rename(node):
-                    if node.data(0, Qt.ItemDataRole.UserRole) == target:
-                        node.setText(0, _row["title"])
-                    for index in range(node.childCount()):
-                        rename(node.child(index))
-
-                rename(iterator)
+                for entry in self.catalog[target[0]]:
+                    if entry["id"] == target[1]:
+                        entry.update(row)
+                self.nav.update_universes(self.catalog["universe"])
+                self.nav.populate(self.catalog, target)
+                self.crumbs.setText(f"{self.nav.section}  /  {row['title']}")
                 self.statusBar().showMessage("Сохранено")
             elif self.selected and self.selected[0] == "scene":
                 self.timer.start()
@@ -329,16 +440,17 @@ class MainWindow(QMainWindow):
 
         self.jobs.submit(lambda: self.library.update(*target, values), success, failure)
 
-    def create_dialog(self):
-        self.guard(self._create_dialog)
+    def create_dialog(self, kind=None, parent=None, preset_kind=None):
+        self.guard(lambda: self._create_dialog(kind, parent, preset_kind))
 
-    def _create_dialog(self):
-        label, ok = QInputDialog.getItem(self, "Создать", "Объект", list(NAMES.values()), 0, False)
-        if not ok:
-            return
-        kind = next(key for key, value in NAMES.items() if value == label)
-        parent = None
-        if kind in ("article", "scene", "work"):
+    def _create_dialog(self, kind, parent, preset_kind):
+        if not kind:
+            choices = list(NAMES.values())
+            label, ok = QInputDialog.getItem(self, "Создать", "Объект", choices, 0, False)
+            if not ok:
+                return
+            kind = next(key for key, value in NAMES.items() if value == label)
+        if kind in ("article", "scene", "work") and parent is None:
             parent_kind = "work" if kind == "scene" else "universe"
             rows = self.catalog[parent_kind]
             choices = (["Без вселенной"] if kind == "work" else []) + [
@@ -356,19 +468,30 @@ class MainWindow(QMainWindow):
                 return
             index = choices.index(choice) - (1 if kind == "work" else 0)
             parent = rows[index]["id"] if index >= 0 else None
-        title, ok = QInputDialog.getText(self, "Создать " + label.lower(), "Название")
-        if ok:
-            self.setEnabled(False)
+        title, ok = QInputDialog.getText(self, "Создать " + NAMES[kind].lower(), "Название")
+        if not ok:
+            return
+        self.setEnabled(False)
 
-            def success(row):
+        def success(row):
+            def done(_=None):
                 self.setEnabled(True)
                 self.refresh((kind, row["id"]))
 
-            def failure(message):
-                self.setEnabled(True)
-                self.error(message)
+            if preset_kind:
+                self.jobs.submit(
+                    lambda: self.library.update(kind, row["id"], {"kind": preset_kind}),
+                    done,
+                    self.error,
+                )
+            else:
+                done()
 
-            self.jobs.submit(lambda: self.library.create(kind, title, parent), success, failure)
+        def failure(message):
+            self.setEnabled(True)
+            self.error(message)
+
+        self.jobs.submit(lambda: self.library.create(kind, title, parent), success, failure)
 
     def delete_dialog(self):
         if not self.selected:
@@ -418,6 +541,8 @@ class MainWindow(QMainWindow):
 
     def _search_dialog(self):
         target = self.selected
+        if not target or target[0] != "universe":
+            return
         query, ok = QInputDialog.getText(self, "Энциклопедия", "Название, текст или тег")
         if not ok:
             return
@@ -431,27 +556,18 @@ class MainWindow(QMainWindow):
                 self, "Результаты", "Открыть статью", choices, 0, False
             )
             if accepted:
-                self.guard(lambda: self.load(("article", rows[choices.index(choice)]["id"])))
+                self.navigate(("article", rows[choices.index(choice)]["id"]))
 
         self.jobs.submit(lambda: self.library.search(target[1], query), found, self.error)
 
     def show_settings(self):
         self.selected = None
         self.clear()
-        self.layout.addWidget(QLabel("Настройки и данные"))
+        self.crumbs.setText("Библиотека  /  Настройки")
+        self.heading("Настройки и данные", "Локальное хранение без обязательных облачных сервисов.")
         self.layout.addWidget(QLabel("База данных: " + str(self.library.engine.url.database)))
-        self.layout.addWidget(
-            QLabel(
-                "Все данные хранятся на этом компьютере.\n"
-                "Резервная копия — SQLite; переносимый экспорт — JSON UTF-8."
-            )
-        )
         for export, label in ((False, "Создать резервную копию"), (True, "Экспортировать JSON")):
-            button = QPushButton(label)
-            button.clicked.connect(
-                lambda _checked=False, export=export: self.file_operation(export)
-            )
-            self.layout.addWidget(button)
+            self._button(label, lambda _=False, e=export: self.file_operation(e), self.layout)
         self.layout.addStretch()
 
     def file_operation(self, export):
@@ -470,14 +586,47 @@ class MainWindow(QMainWindow):
                 self.error,
             )
 
+    def toggle_properties(self):
+        if not self.props.isHidden():
+            self.normal_splitter_state = self.split.saveState()
+        self.props.setVisible(self.props.isHidden())
+        if not self.props.isHidden() and self.normal_splitter_state:
+            self.split.restoreState(self.normal_splitter_state)
+        self.props_toggle.setText(
+            "Показать свойства" if self.props.isHidden() else "Скрыть свойства"
+        )
+
+    def toggle_focus(self):
+        if not self.focus_mode:
+            self.properties_before_focus = not self.props.isHidden()
+            self.normal_splitter_state = self.split.saveState()
+        self.focus_mode = not self.focus_mode
+        self.nav.setVisible(not self.focus_mode)
+        self.props.setVisible(False if self.focus_mode else self.properties_before_focus)
+        if not self.focus_mode and self.normal_splitter_state:
+            self.split.restoreState(self.normal_splitter_state)
+        self.props_toggle.setEnabled(not self.focus_mode)
+        self.focus_button.setText("Выйти из режима письма" if self.focus_mode else "Режим письма")
+        if self.focus_mode:
+            self.editor.setFocus() if hasattr(self, "editor") else None
+
     def closeEvent(self, event):
         if self.closing:
+            state = (
+                self.split.saveState()
+                if not self.focus_mode and not self.props.isHidden()
+                else (self.normal_splitter_state or self.split.saveState())
+            )
+            self.settings.setValue("splitter", state)
+            self.settings.setValue(
+                "properties_visible",
+                self.properties_before_focus if self.focus_mode else not self.props.isHidden(),
+            )
             event.accept()
             return
         event.ignore()
 
         def finish():
-            # Sentinel runs after every queued operation, so shutdown cannot block on disk I/O.
             self.setEnabled(False)
 
             def drained(_):
