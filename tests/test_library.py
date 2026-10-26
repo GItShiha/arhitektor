@@ -19,10 +19,11 @@ def test_migration_repeatable(library):
         "scenes",
         "alembic_version",
         "article_relations",
+        "article_templates",
     }
     with engine.connect() as connection:
         assert (
-            connection.exec_driver_sql("select version_num from alembic_version").scalar() == "0002"
+            connection.exec_driver_sql("select version_num from alembic_version").scalar() == "0003"
         )
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
     engine.dispose()
@@ -108,7 +109,7 @@ def test_backup_export(library, tmp_path):
     restored.dispose()
     exported = library.export(tmp_path / "export.json")
     payload = json.loads(exported.read_text())
-    assert payload["version"] == 1
+    assert payload["version"] == 2
     assert payload["data"]["scene"][0]["content"] == "Текст из WAL"
     with pytest.raises(ValueError):
         library.backup(backup)

@@ -14,7 +14,15 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from arhitektor.models import Article, ArticleRelation, Entity, Scene, Universe, Work
+from arhitektor.models import (
+    Article,
+    ArticleRelation,
+    ArticleTemplate,
+    Entity,
+    Scene,
+    Universe,
+    Work,
+)
 
 MODELS = {"universe": Universe, "article": Article, "work": Work, "scene": Scene}
 EDITABLE = {
@@ -57,6 +65,7 @@ class Library:
                 for kind, model in MODELS.items()
             }
             data["relation"] = [record(row) for row in session.scalars(select(ArticleRelation))]
+            data["template"] = [record(row) for row in session.scalars(select(ArticleTemplate))]
             return data
 
     def search(self, universe_id: int, query: str) -> list[dict[str, Any]]:
@@ -87,6 +96,20 @@ class Library:
             obj = MODELS[kind](**values)
             session.add(obj)
             session.flush()
+            if isinstance(obj, Universe):
+                from arhitektor.templates import BUILTINS
+
+                for index, name in enumerate(BUILTINS):
+                    session.add(
+                        ArticleTemplate(
+                            universe_id=obj.id,
+                            title=name,
+                            position=index,
+                            definitions=[],
+                            navigation_kind=name,
+                        )
+                    )
+                session.flush()
             return record(obj)
 
     def update(self, kind: str, identifier: int, values: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +129,22 @@ class Library:
             obj = session.get(MODELS[kind], identifier)
             if obj is None:
                 raise ValueError("Объект не найден")
+            if isinstance(obj, Article) and "fields" in values:
+                from arhitektor.templates import validate_value
+
+                for template in session.scalars(
+                    select(ArticleTemplate).where(ArticleTemplate.universe_id == obj.universe_id)
+                ):
+                    for definition in template.definitions:
+                        if definition["id"] in values["fields"] and values["fields"][
+                            definition["id"]
+                        ] != obj.fields.get(definition["id"]):
+                            validate_value(
+                                session,
+                                obj.universe_id,
+                                definition,
+                                values["fields"][definition["id"]],
+                            )
             for key, value in values.items():
                 setattr(obj, key, value)
             if isinstance(obj, Scene):
@@ -187,7 +226,7 @@ class Library:
             raise ValueError("Выберите новое имя для экспорта")
         payload = {
             "format": "arhitektor",
-            "version": 1,
+            "version": 2,
             "exported_at": datetime.now(UTC).isoformat(),
             "data": self.catalog(),
         }

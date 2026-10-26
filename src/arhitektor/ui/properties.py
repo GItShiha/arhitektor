@@ -11,10 +11,13 @@ from PySide6.QtWidgets import (
 )
 
 from arhitektor.ui.field_editor import FieldEditor, scroll_area
+from arhitektor.ui.templates import TemplateFields
 
 
 class PropertiesPanel(QWidget):
     changed = Signal()
+    template_requested = Signal(int)
+    open_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -29,7 +32,7 @@ class PropertiesPanel(QWidget):
         self.form = None
         self.fields: dict[str, QWidget] = {}
 
-    def show_record(self, kind: str, row: dict, universes: list[dict]):
+    def show_record(self, kind: str, row: dict, universes: list[dict], templates=(), articles=()):
         self.clear()
         heading = QLabel("СВОЙСТВА")
         heading.setObjectName("eyebrow")
@@ -48,11 +51,39 @@ class PropertiesPanel(QWidget):
                 "scene": "Сцена",
             }[kind],
         )
-        if kind in ("article", "work"):
+        if kind == "work":
             self._line("kind", "Тип", row["kind"])
         if kind == "article":
             self._line("tags", "Теги", ", ".join(row["tags"]))
-            self._editor("fields", "Доп. поля", row["fields"])
+            available = sorted(
+                [t for t in templates if t["universe_id"] == row["universe_id"]],
+                key=lambda t: t["position"],
+            )
+            combo = QComboBox()
+            combo.setMinimumWidth(0)
+            combo.addItem(row["kind"] + " (текущий)", None)
+            for template in available:
+                combo.addItem(template["title"], template["id"])
+            combo.setCurrentIndex(max(0, combo.findData(row.get("template_id"))))
+            combo.currentIndexChanged.connect(
+                lambda _: (
+                    self.template_requested.emit(combo.currentData())
+                    if combo.currentData() is not None
+                    else None
+                )
+            )
+            self.form.addRow("Тип", combo)
+            template = next((t for t in available if t["id"] == row.get("template_id")), None)
+            widget = TemplateFields(
+                row["fields"],
+                template,
+                available,
+                [a for a in articles if a["universe_id"] == row["universe_id"]],
+            )
+            widget.changed.connect(self.changed)
+            widget.open_requested.connect(self.open_requested)
+            self.fields["fields"] = widget
+            self.form.addRow("Поля", widget)
         if kind == "universe":
             self._editor("settings", "Настройки", row["settings"])
         if kind == "work":

@@ -70,13 +70,30 @@ def test_migration_keeps_legacy_fields_and_makes_backup(tmp_path):
     with engine.begin() as connection:
         cfg.attributes["connection"] = connection
         command.upgrade(cfg, "0001")
-    person, org = pair(Library(engine))
+    import json
+
+    from sqlalchemy import text
+
     values = {"имя": "Лев", "семья": [None, {"сестра": "Анна"}]}
-    Library(engine).update("article", person["id"], {"fields": values, "kind": "Свой старый тип"})
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO universes(id,title,description,settings,created_at,updated_at) VALUES (1,'Мир','','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+            )
+        )
+        for identifier, title in ((1, "Лев"), (2, "Служба")):
+            connection.execute(
+                text(
+                    "INSERT INTO articles(id,universe_id,title,kind,content,tags,fields,created_at,updated_at) VALUES (:i,1,:t,'Свой старый тип','','[]',:f,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+                ),
+                {"i": identifier, "t": title, "f": json.dumps(values)},
+            )
+    person, org = {"id": 1}, {"id": 2}
     engine.dispose()
     upgraded = open_database(path)
     row = Library(upgraded).get("article", person["id"])
     assert row["fields"] == values and row["kind"] == "Свой старый тип"
+    assert row["template_id"] is not None
     copies = list((tmp_path / "backups").glob("*.sqlite3"))
     assert len(copies) == 1
     with sqlite3.connect(copies[0]) as connection:

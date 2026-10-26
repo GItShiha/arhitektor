@@ -31,6 +31,7 @@ class Universe(Entity):
 
 class Article(Entity):
     __tablename__ = "articles"
+    template_id: Mapped[int | None] = mapped_column(ForeignKey("article_templates.id"))
     universe_id: Mapped[int] = mapped_column(
         ForeignKey("universes.id", ondelete="CASCADE"), index=True
     )
@@ -73,3 +74,14 @@ class ArticleRelation(Base):
     )
     label: Mapped[str] = mapped_column(String(200))
     reverse_label: Mapped[str] = mapped_column(String(200))
+
+
+class ArticleTemplate(Base):
+    __tablename__ = "article_templates"
+    navigation_kind: Mapped[str] = mapped_column(String(100), default="")
+    __table_args__ = (UniqueConstraint("universe_id", "title", name="uq_template_title"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    universe_id: Mapped[int] = mapped_column(ForeignKey("universes.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(300))
+    position: Mapped[int]
+    definitions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
