@@ -79,3 +79,20 @@ class Relations:
             if row is None:
                 raise ValueError("Связь не найдена")
             session.delete(row)
+
+    def delete_many(self, article_id: int, identifiers: list[int]) -> None:
+        """Validate the whole selection and delete both directions atomically."""
+        identifiers = set(identifiers)
+        if not identifiers:
+            return
+        with Session(self.engine) as session, session.begin():
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            rows = list(
+                session.scalars(select(ArticleRelation).where(ArticleRelation.id.in_(identifiers)))
+            )
+            if len(rows) != len(identifiers) or any(
+                article_id not in (row.source_id, row.target_id) for row in rows
+            ):
+                raise ValueError("Список связей изменился. Откройте диалог заново")
+            for row in rows:
+                session.delete(row)
