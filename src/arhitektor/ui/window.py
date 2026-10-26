@@ -21,10 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from arhitektor.relations import Relations
 from arhitektor.services import Library, count_words
 from arhitektor.ui.jobs import Jobs
 from arhitektor.ui.navigation import NavigationPanel
 from arhitektor.ui.properties import FieldEditor, PropertiesPanel
+from arhitektor.ui.relations import RelatedObjects, RelationDialog
 
 NAMES = {"universe": "Вселенная", "article": "Статья", "work": "Произведение", "scene": "Сцена"}
 
@@ -320,6 +322,20 @@ class MainWindow(QMainWindow):
         self.counter = QLabel()
         self.layout.addWidget(self.counter)
         self.update_counter()
+        if kind == "article":
+            for compact in (False, True):
+                related = RelatedObjects(row["id"], self.catalog, compact)
+                related.open_requested.connect(
+                    lambda identifier: self.navigate(("article", identifier))
+                )
+                related.create_requested.connect(lambda: self.guard(self.create_relation))
+                related.delete_requested.connect(
+                    lambda identifier: self.guard(lambda: self.delete_relation(identifier))
+                )
+                if compact:
+                    self.props.layout.insertWidget(self.props.layout.count() - 1, related)
+                else:
+                    self.layout.addWidget(related)
         if kind == "universe":
             articles = [a for a in self.catalog["article"] if a["universe_id"] == row["id"]]
             works = [w for w in self.catalog["work"] if w["universe_id"] == row["id"]]
@@ -366,6 +382,42 @@ class MainWindow(QMainWindow):
         self._button("Удалить", lambda: self.guard(self.delete_dialog), actions)
         self.layout.addLayout(actions)
         self.loading = False
+
+    def create_relation(self):
+        source_id = self.selected[1]
+        source = next(row for row in self.catalog["article"] if row["id"] == source_id)
+        candidates = [
+            row
+            for row in self.catalog["article"]
+            if row["universe_id"] == source["universe_id"] and row["id"] != source_id
+        ]
+        dialog = RelationDialog(candidates, self)
+        if dialog.exec():
+            target, label, reverse = dialog.values()
+            self.run_relation(
+                lambda: Relations(self.library.engine).create(source_id, target, label, reverse)
+            )
+
+    def delete_relation(self, identifier):
+        answer = QMessageBox.question(
+            self,
+            "Удалить связь?",
+            "Статьи сохранятся. Удалить эту связь?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.run_relation(lambda: Relations(self.library.engine).delete(identifier))
+
+    def run_relation(self, operation):
+        target = self.selected
+        self.setEnabled(False)
+
+        def failed(message):
+            self.setEnabled(True)
+            self.error(message)
+
+        self.jobs.submit(operation, lambda _: self.refresh(target), failed)
 
     def update_counter(self):
         self.counter.setText(f"Слов: {count_words(self.editor.toPlainText())}")

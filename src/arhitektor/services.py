@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from arhitektor.models import Article, Entity, Scene, Universe, Work
+from arhitektor.models import Article, ArticleRelation, Entity, Scene, Universe, Work
 
 MODELS = {"universe": Universe, "article": Article, "work": Work, "scene": Scene}
 EDITABLE = {
@@ -47,7 +47,7 @@ class Library:
     def catalog(self) -> dict[str, list[dict[str, Any]]]:
         with Session(self.engine) as session:
             session.connection().exec_driver_sql("BEGIN")
-            return {
+            data = {
                 kind: [
                     record(obj)
                     for obj in session.scalars(
@@ -56,6 +56,8 @@ class Library:
                 ]
                 for kind, model in MODELS.items()
             }
+            data["relation"] = [record(row) for row in session.scalars(select(ArticleRelation))]
+            return data
 
     def search(self, universe_id: int, query: str) -> list[dict[str, Any]]:
         # Unicode casefold also handles Cyrillic, unlike SQLite's built-in NOCASE.
