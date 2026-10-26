@@ -28,6 +28,7 @@ class NavigationPanel(QWidget):
     create_requested = Signal()
     settings_requested = Signal()
     back_requested = Signal()
+    templates_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +62,9 @@ class NavigationPanel(QWidget):
         self.search.setPlaceholderText("Поиск в разделе…")
         self.search.textChanged.connect(self.filter_tree)
         layout.addWidget(self.search)
+        self.templates_button = QPushButton("Типы и шаблоны")
+        self.templates_button.clicked.connect(self.templates_requested)
+        layout.addWidget(self.templates_button)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.currentItemChanged.connect(self.choose)
@@ -110,6 +114,8 @@ class NavigationPanel(QWidget):
         }[kind]
 
     def populate(self, catalog: dict[str, list[dict]], selected=None):
+        self.templates_button.setVisible(self.section not in ("Обзор", "Произведения"))
+        self.universe_names = {u["id"]: u["title"] for u in catalog["universe"]}
         self.tree.blockSignals(True)
         self.tree.clear()
         section, universe_id = self.section, self.universe_id
@@ -150,7 +156,11 @@ class NavigationPanel(QWidget):
         self.filter_tree(self.search.text())
 
     def _item(self, parent, row, kind, nodes=None):
-        item = QTreeWidgetItem(parent, [row["title"]])
+        title = row["title"]
+        if kind == "article" and self.universe_id is None:
+            title += " · " + self.universe_names.get(row["universe_id"], "")
+        item = QTreeWidgetItem(parent, [title])
+        item.setToolTip(0, title)
         item.setData(0, Qt.ItemDataRole.UserRole, (kind, row["id"]))
         item.setData(
             0,
