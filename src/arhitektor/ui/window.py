@@ -116,6 +116,9 @@ class MainWindow(QMainWindow):
         action.triggered.connect(self.save)
         self.addAction(action)
         self.refresh()
+        from arhitektor.ui.updates import Updates
+
+        self.updates = Updates(self)
 
     @property
     def tree(self):  # Compatibility for callers using the former tree attribute.
@@ -760,6 +763,7 @@ class MainWindow(QMainWindow):
         self.heading("Настройки и данные", "Локальное хранение без обязательных облачных сервисов.")
         self.layout.addWidget(QLabel("База данных: " + str(self.library.engine.url.database)))
         self._button("Типы и шаблоны", self.manage_templates, self.layout)
+        self._button("Обновления", self.updates.open_settings, self.layout)
         for export, label in ((False, "Создать резервную копию"), (True, "Экспортировать JSON")):
             self._button(label, lambda _=False, e=export: self.file_operation(e), self.layout)
         self.layout.addStretch()
@@ -827,6 +831,16 @@ class MainWindow(QMainWindow):
             self.setEnabled(False)
 
             def drained(_):
+                try:
+                    action = getattr(self, "close_action", None)
+                    if action:
+                        self.close_action = None
+                        action()
+                except OSError:
+                    self.setEnabled(True)
+                    self.error("Не удалось запустить установщик. Приложение остаётся открытым.")
+                    return
+                self.updates.shutdown()
                 self.closing = True
                 self.jobs.shutdown()
                 self.close()
