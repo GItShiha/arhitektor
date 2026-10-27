@@ -177,10 +177,14 @@ class Updates(QWidget):
             process.deleteLater()
             self.check_button.setEnabled(True)
             if "error" in result:
-                self.target = None
-                self.install_button.setEnabled(False)
-                self.notice.hide()
-                self.status.setText(result["error"])
+                if action == "rollback-check":
+                    self.rollback_button.setEnabled(False)
+                    self.history.setText("Возврат недоступен: " + result["error"])
+                else:
+                    self.target = None
+                    self.install_button.setEnabled(False)
+                    self.notice.hide()
+                    self.status.setText(result["error"])
             else:
                 callback(result)
 
@@ -239,11 +243,13 @@ class Updates(QWidget):
     def confirm(self, _checked=False, rollback=False):
         if self.installer or (not self.target and not rollback):
             return
+        confirmed_target = self.target
         answer = QMessageBox.question(
             self.window,
             "Вернуться?" if rollback else "Установить обновление?",
             "Работа будет сохранена, приложение закроется и перезапустится. "
-            "Установка может занять несколько минут. Продолжить?",
+            "Установка может занять несколько минут. Продолжить?"
+            + ("\nРевизия: " + confirmed_target if not rollback else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -251,7 +257,7 @@ class Updates(QWidget):
             return
 
         def ready(_):
-            self.window.guard(lambda: self.close_for_install(rollback))
+            self.window.guard(lambda: self.close_for_install(rollback, confirmed_target))
 
         if rollback:
             ready(None)
@@ -261,13 +267,15 @@ class Updates(QWidget):
                 ready,
                 [
                     "--target",
-                    self.target,
+                    confirmed_target,
                     "--database",
                     str(self.window.library.engine.url.database),
                 ],
             )
 
-    def close_for_install(self, rollback=False):
+    def close_for_install(self, rollback=False, target=None):
+        target = target or self.target
+
         def spawn():
             read_fd, write_fd = os.pipe()
             try:
@@ -280,7 +288,7 @@ class Updates(QWidget):
                         "--root",
                         str(ROOT),
                         "--target",
-                        self.target or "rollback",
+                        target or "rollback",
                         "--database",
                         str(self.window.library.engine.url.database),
                         "--wait-fd",

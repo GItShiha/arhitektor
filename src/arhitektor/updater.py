@@ -388,12 +388,17 @@ def main():
             with os.fdopen(args.wait_fd, "rb") as gate:
                 gate.read()  # EOF after process exit, not window.hide().
             try:
-                install(args.root, args.target, args.database, rollback=args.action == "rollback")
+                succeeded = install(
+                    args.root, args.target, args.database, rollback=args.action == "rollback"
+                )
             except (OSError, ValueError, RuntimeError):
                 # Pointer recovery is done under the installer lock on the next ordinary launch.
                 launch(version(args.root), state_dir())
                 raise
-            value = {"ok": True}
+            value = {"ok": succeeded}
+            if not succeeded:
+                print(json.dumps(value))
+                return 1
         print(json.dumps(value))
         return 0
     except (OSError, ValueError, RuntimeError) as error:

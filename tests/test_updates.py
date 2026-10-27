@@ -362,6 +362,8 @@ def test_real_release_activation_restart_and_rollback(library, tmp_path, monkeyp
         active = read_json(folder / "active.json")
         assert active["revision"] == target
         assert processes[-1].poll() is None
+        with pytest.raises(u.UpdateError):
+            u.run([active["python"], "-m", "arhitektor.app"], cwd=active["code"], timeout=5)
         processes[-1].terminate()
         processes[-1].wait(timeout=10)
         # New data is retained by manual rollback; rollback performs new copy/read checks.
@@ -377,3 +379,135 @@ def test_real_release_activation_restart_and_rollback(library, tmp_path, monkeyp
                 p.terminate()
             p.wait(timeout=10)
         live.engine.dispose()
+
+
+def test_failed_launch_rolls_back_code_without_replacing_new_data(
+    repository, library, tmp_path, monkeypatch
+):
+    root, old, target = repository
+    database = Path(library.engine.url.database)
+    folder = tmp_path / "updates"
+    monkeypatch.setattr(u, "preflight", lambda *a: None)
+    monkeypatch.setattr(u, "check", lambda *a: {"target": target})
+    monkeypatch.setattr(
+        u, "prepare", lambda *a: {"code": str(root), "python": sys.executable, "revision": target}
+    )
+    monkeypatch.setattr(u, "probe", lambda *a: None)
+    real_run = u.run
+    monkeypatch.setattr(
+        u, "run", lambda args, **kw: "" if "pytest" in args else real_run(args, **kw)
+    )
+    launches = []
+
+    def launch(ver, folder, token=None):
+        launches.append(ver["revision"])
+        if token:
+            library.create("universe", "Новые данные не заменять")
+            raise u.UpdateError("Неудачный старт")
+
+    monkeypatch.setattr(u, "launch", launch)
+    assert not u.install(root, target, database, folder)
+    assert launches == [target, old]
+    assert library.catalog()["universe"][0]["title"] == "Новые данные не заменять"
+    assert read_json(folder / "active.json")["revision"] == old
+
+
+def test_check_process_leaves_qt_event_loop_responsive(qtbot, library, tmp_path, monkeypatch):
+    from PySide6.QtCore import QTimer
+
+    from arhitektor.ui.window import MainWindow
+
+    monkeypatch.setenv("ARHITEKTOR_PROBE", "1")
+    window = MainWindow(library)
+    qtbot.addWidget(window)
+    panel = window.updates
+    panel.settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    panel.enabled = True
+    ticks = []
+    timer = QTimer(window)
+    timer.timeout.connect(lambda: ticks.append(True))
+    timer.start(5)
+    panel.check(True)
+    qtbot.waitUntil(lambda: panel.process is None, timeout=10000)
+    assert ticks
+    panel.shutdown()
+    qtbot.waitUntil(lambda: window.isEnabled())
+    window.close()
+    qtbot.waitUntil(lambda: window.closing)
+
+
+def test_confirmation_pins_revision_and_cancel_is_noop(qtbot, library, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from arhitektor.ui.window import MainWindow
+
+    monkeypatch.setenv("ARHITEKTOR_PROBE", "1")
+    window = MainWindow(library)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window.isEnabled())
+    panel = window.updates
+    panel.target = "a" * 40
+    commands = []
+    installed = []
+    monkeypatch.setattr(
+        panel,
+        "command",
+        lambda action, callback, extra=(): (commands.append((action, extra)), callback({})),
+    )
+    monkeypatch.setattr(window, "guard", lambda callback: callback())
+    monkeypatch.setattr(
+        panel, "close_for_install", lambda rollback, target: installed.append(target)
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.StandardButton.Cancel)
+    panel.confirm()
+    assert not commands and not installed
+
+    def answer(*args):
+        assert "a" * 40 in args[2]
+        panel.target = "b" * 40  # New automatic result while the modal is open.
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", answer)
+    panel.confirm()
+    assert installed == ["a" * 40]
+    assert commands[0][1][1] == "a" * 40
+    panel.shutdown()
+    window.close()
+    qtbot.waitUntil(lambda: window.closing)
+
+
+def test_save_failure_cannot_start_installer(qtbot, library, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from arhitektor.ui.window import MainWindow
+
+    monkeypatch.setenv("ARHITEKTOR_PROBE", "1")
+    work = library.create("work", "Роман")
+    scene = library.create("scene", "Глава", work["id"])
+    window = MainWindow(library)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: bool(window.catalog) and window.isEnabled())
+    window.navigate(("scene", scene["id"]))
+    qtbot.waitUntil(lambda: window.selected == ("scene", scene["id"]) and window.isEnabled())
+    errors = []
+    monkeypatch.setattr(window, "error", errors.append)
+
+    def failed(*args):
+        raise OSError("Нет доступа для записи")
+
+    monkeypatch.setattr(library, "update", failed)
+    window.editor.setPlainText("Несохранённая глава")
+    panel = window.updates
+    panel.target = "a" * 40
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(panel, "command", lambda action, callback, extra=(): callback({}))
+    panel.confirm()
+    qtbot.waitUntil(lambda: bool(errors) and not window.saving)
+    assert window.dirty and not window.closing and panel.installer is None
+    assert not getattr(window, "close_action", None)
+    assert window.editor.toPlainText() == "Несохранённая глава"
+    window.timer.stop()
+    window.dirty = False  # Test teardown only; the actual editor remains open after failure.
+    window.close()
+    qtbot.waitUntil(lambda: window.closing)
