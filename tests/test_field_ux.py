@@ -75,12 +75,17 @@ def test_universe_filter_labels_and_restart(qtbot, library, monkeypatch, tmp_pat
     qtbot.waitUntil(lambda: bool(window.catalog))
     window.open_section("Энциклопедия")
     root = window.tree.topLevelItem(0)
-    assert root.childCount() == 2
-    assert "Север" in root.child(0).text(0) and "Юг" in root.child(1).text(0)
+    assert window.tree.topLevelItemCount() == 2
+    assert root.text(0) == "Север"
+    assert window.tree.topLevelItem(1).text(0) == "Юг"
     assert window.nav.templates_button.isVisible()
     window.nav.universe.setCurrentIndex(window.nav.universe.findData(two["id"]))
-    root = window.tree.topLevelItem(0)
-    assert root.childCount() == 1 and root.child(0).data(0, Qt.ItemDataRole.UserRole) == (
+    articles = [
+        i
+        for i in window.nav.items()
+        if (i.data(0, Qt.ItemDataRole.UserRole) or (None,))[0] == "article"
+    ]
+    assert len(articles) == 1 and articles[0].data(0, Qt.ItemDataRole.UserRole) == (
         "article",
         b["id"],
     )

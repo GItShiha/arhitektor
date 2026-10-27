@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -47,11 +49,12 @@ class MainWindow(QMainWindow):
         self.selected: tuple[str, int] | None = None
         self.catalog: dict[str, list[dict[str, Any]]] = {}
         self.fields: dict[str, Any] = {}
-        self.history: list[tuple[str, tuple[str, int] | None, int | None]] = []
+        self.history: list[tuple] = []
         self.revision = 0
         self.dirty = self.saving = self.closing = self.loading = False
         self.focus_mode = False
         self.properties_before_focus = True
+        self.category = None
         self.view_section = "Обзор"
         self.view_universe = None
         self.settings = QSettings("Arhitektor", "Arhitektor")
@@ -149,7 +152,10 @@ class MainWindow(QMainWindow):
             else:
                 self.setEnabled(True)
                 if self.selected is None:
-                    self.show_section_page()
+                    if self.category:
+                        self.show_category(self.category)
+                    else:
+                        self.show_section_page()
             self.statusBar().showMessage("Библиотека загружена")
 
         def failed(message):
@@ -182,6 +188,7 @@ class MainWindow(QMainWindow):
         self.show_section_page()
 
     def show_section_page(self):
+        self.category = None
         self.selected = None
         self.clear()
         section = self.nav.section
@@ -211,8 +218,46 @@ class MainWindow(QMainWindow):
                 self.layout.addWidget(QLabel(f"Произведений: {len(rows)}"))
         self.layout.addStretch()
 
+    def show_category(self, key):
+        group = getattr(self.nav, "categories", {}).get(key)
+        if group is None:
+            self.show_section_page()
+            return
+        self.selected = None
+        self.category = key
+        self.clear()
+        self.view_section = self.nav.section
+        self.view_universe = self.nav.universe_id
+        self.nav.select_target(key)
+        self.crumbs.setText("Энциклопедия / " + group["title"])
+        self.heading(group["title"], f"Статей: {len(group['rows'])}")
+        if not group["rows"]:
+            self.layout.addWidget(QLabel("В этой категории пока нет статей"))
+        listing = QListWidget()
+        for row in group["rows"]:
+            item = QListWidgetItem(row["title"])
+            item.setToolTip(row["title"])
+            item.setData(Qt.ItemDataRole.UserRole, row["id"])
+            listing.addItem(item)
+        listing.itemClicked.connect(
+            lambda item: self.navigate(("article", item.data(Qt.ItemDataRole.UserRole)))
+        )
+        self.layout.addWidget(listing)
+        self._button(
+            "Создать статью",
+            lambda: self.create_dialog("article", key[1], key[3], key[2]),
+            self.layout,
+        )
+        self.layout.addStretch()
+
     def _location(self):
-        return self.nav.section, self.selected, self.nav.universe_id
+        return (
+            self.view_section,
+            self.selected,
+            self.view_universe,
+            self.category,
+            self.nav.search.text(),
+        )
 
     def transition(self, action):
         previous = self._location()
@@ -224,6 +269,9 @@ class MainWindow(QMainWindow):
         self.guard(proceed)
 
     def navigate(self, target, remember=True):
+        if target[0] == "category":
+            self.transition(lambda: self.show_category(target))
+            return
         if target == self.selected:
             return
 
@@ -267,13 +315,16 @@ class MainWindow(QMainWindow):
             return
 
         def proceed():
-            section, target, uid = self.history.pop()
+            section, target, uid, category, query = self.history.pop()
             self.nav.universe.blockSignals(True)
             self.nav.universe.setCurrentIndex(max(0, self.nav.universe.findData(uid)))
             self.nav.universe.blockSignals(False)
             self.nav.select_section(section)
-            self.nav.populate(self.catalog, target)
-            if target:
+            self.nav.search.setText(query)
+            self.nav.populate(self.catalog, target or category)
+            if category and not target:
+                self.show_category(category)
+            elif target:
                 self.load(target)
             else:
                 self.show_section_page()
@@ -293,6 +344,7 @@ class MainWindow(QMainWindow):
 
         def ready(row):
             self.selected = target
+            self.category = None
             self.dirty = False
             self.nav.select_target(target)
             self.render(target[0], row)
@@ -432,7 +484,7 @@ class MainWindow(QMainWindow):
         if not universes:
             self.error("Сначала создайте вселенную")
             return
-        uid = self.nav.universe_id
+        uid = self.category[1] if self.category else self.nav.universe_id
         if uid is None:
             labels = [f"{u['title']} · #{u['id']}" for u in universes]
             chosen, ok = QInputDialog.getItem(self, "Типы и шаблоны", "Вселенная", labels, 0, False)
@@ -616,10 +668,13 @@ class MainWindow(QMainWindow):
 
         self.jobs.submit(lambda: self.library.update(*target, values), success, failure)
 
-    def create_dialog(self, kind=None, parent=None, preset_kind=None):
-        self.guard(lambda: self._create_dialog(kind, parent, preset_kind))
+    def create_dialog(self, kind=None, parent=None, preset_kind=None, template_id=None):
+        self.guard(lambda: self._create_dialog(kind, parent, preset_kind, template_id))
 
-    def _create_dialog(self, kind, parent, preset_kind):
+    def _create_dialog(self, kind, parent, preset_kind, template_id=None):
+        if not kind and self.category:
+            _, parent, template_id, preset_kind = self.category
+            kind = "article"
         if not kind:
             choices = list(NAMES.values())
             label, ok = QInputDialog.getItem(self, "Создать", "Объект", choices, 0, False)
@@ -649,8 +704,8 @@ class MainWindow(QMainWindow):
         title, ok = QInputDialog.getText(self, "Создать " + NAMES[kind].lower(), "Название")
         if not ok:
             return
-        chosen_template = None
-        if kind == "article":
+        chosen_template = template_id
+        if kind == "article" and template_id is None and not preset_kind:
             templates = [t for t in self.catalog.get("template", []) if t["universe_id"] == parent]
             if templates:
                 labels = [t["title"] for t in templates]
