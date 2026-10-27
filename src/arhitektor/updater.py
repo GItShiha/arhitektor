@@ -12,6 +12,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -210,23 +211,31 @@ def launch(ver, folder, token=None):
     )
     if not token:
         return process
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline and process.poll() is None:
-        if read_json(ready, {}).get("token") == token:
-            time.sleep(2)
-            if process.poll() is None:
-                ready.unlink(missing_ok=True)
-                return process
-            break
-        time.sleep(0.1)
-    # This is the unready trial process, never the user's original GUI.
-    process.terminate()
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-    raise UpdateError("Новая версия не подтвердила открытие библиотеки и запуск окна")
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline and process.poll() is None:
+            if read_json(ready, {}).get("token") == token:
+                time.sleep(2)
+                if process.poll() is None:
+                    ready.unlink(missing_ok=True)
+                    return process
+                break
+            time.sleep(0.1)
+        raise UpdateError("Новая версия не подтвердила открытие библиотеки и запуск окна")
+    except BaseException:
+        # Any failure after Popen (including malformed readiness data or interruption)
+        # must reap the trial before rollback can acquire the library locks.
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        raise
 
 
 def backup_database(database, destination):
@@ -269,95 +278,130 @@ def safe_previous(journal, database):
     return previous
 
 
+@dataclass
+class InstallOutcome:
+    success: bool
+    restart: dict | None = None
+    error: UpdateError | None = None
+    token: str | None = None
+
+
 def install(root, target, database, folder=None, rollback=False):
     folder = Path(folder or state_dir())
     folder.mkdir(parents=True, exist_ok=True)
     with lease(folder / "install.lock"):
-        recover(folder)
-        # GUI holds the same lease until its process actually exits.
-        with lease(folder / "gui.lock"), application_lock(database):
-            previous = version(root)
-            original_schema = schema(database)
-            journal = {
-                "phase": "preparing",
-                "previous": previous,
-                "database": str(database),
-                "schema": original_schema,
-                "target": target,
-                "token": uuid.uuid4().hex,
-            }
-            old_journal = read_json(folder / "transaction.json", {})
-            atomic(folder / "transaction.json", journal)
-            try:
-                if rollback:
-                    candidate = safe_previous(old_journal, database)
-                else:
-                    preflight(root, target, database, folder)
-                    candidate = None
-                if candidate is None:
-                    candidate = prepare(root, target, folder)
-                journal["phase"] = "backing_up"
-                atomic(folder / "transaction.json", journal)
-                backup = folder.parent / "backups" / ("pre-update-" + uuid.uuid4().hex + ".sqlite3")
-                backup_database(database, backup)
-                journal.update(phase="testing", backup=str(backup))
-                atomic(folder / "transaction.json", journal)
-                with tempfile.TemporaryDirectory(dir=folder) as scratch:
-                    scratch = Path(scratch)
-                    test_db = scratch / "library.sqlite3"
-                    backup_database(backup, test_db)
-                    probe(candidate, test_db, scratch)
-                    if schema(test_db) != original_schema:
-                        raise UpdateError("Новая версия меняет схему. Установка заблокирована.")
-                    probe(previous, test_db, scratch)
-                    env = environment()
-                    env.update(
-                        QT_QPA_PLATFORM="offscreen",
-                        XDG_DATA_HOME=str(scratch / "xdg"),
-                        XDG_CONFIG_HOME=str(scratch / "config"),
-                    )
-                    run(
-                        [candidate["python"], "-m", "pytest", "-q"],
-                        cwd=candidate["code"],
-                        env=env,
-                        timeout=300,
-                    )
-                if not rollback and check(root)["target"] != target:
-                    raise UpdateError("main изменилась. Подтвердите новую ревизию заново.")
-                if validate(root) != previous["revision"] or schema(database) != original_schema:
-                    raise UpdateError("Исходная версия или схема изменились во время подготовки")
-                journal.update(phase="launching", candidate=candidate)
-                atomic(folder / "transaction.json", journal)
-                atomic(folder / "active.json", candidate)
-            except Exception as error:
-                journal.update(
-                    phase="failed",
-                    error=str(error)
-                    if isinstance(error, UpdateError)
-                    else "Ошибка подготовки. Старая версия сохранена.",
-                )
-                atomic(folder / "active.json", previous)
-                atomic(folder / "transaction.json", journal)
-                log(folder, journal["error"])
-                raise UpdateError(journal["error"]) from error
+        outcome = _install_locked(root, target, database, folder, rollback)
+    # A normal GUI cannot pass bootstrap.route while install.lock is held.
+    # The locked part publishes/revalidates the pointer, but never restarts the old GUI.
+    if outcome.restart:
         try:
-            launch(candidate, folder, journal["token"])
-        except UpdateError:
-            with lease(folder / "gui.lock"), application_lock(database):
-                restored = safe_previous(journal, database)
-                atomic(folder / "active.json", restored)
-                journal.update(phase="failed", error="Неудачный запуск; выбрана предыдущая версия")
-                atomic(folder / "transaction.json", journal)
-            launch(restored, folder)
-            return False
-        journal.update(
-            phase="rolled_back" if rollback else "complete",
-            installed=candidate,
-            completed_at=datetime.now(UTC).isoformat(),
-        )
+            launch(outcome.restart, folder)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            message = (
+                "Предыдущая версия выбрана, но не запущена. Повторите обычный запуск приложения."
+            )
+            try:
+                with lease(folder / "install.lock"):
+                    journal = read_json(folder / "transaction.json", {})
+                    if journal.get("token") == outcome.token and journal.get("phase") == "failed":
+                        journal["error"] = message
+                        atomic(folder / "transaction.json", journal)
+                        log(folder, message)
+            except BlockingIOError:
+                pass  # Another installer owns the journal now; do not overwrite it.
+            raise UpdateError(message) from error
+    if outcome.error:
+        raise outcome.error
+    return outcome.success
+
+
+def _install_locked(root, target, database, folder, rollback):
+    """Called only with install.lock held; return a deferred restart after all leases exit."""
+    recover(folder)
+    # GUI holds the same lease until its process actually exits.
+    with lease(folder / "gui.lock"), application_lock(database):
+        previous = version(root)
+        original_schema = schema(database)
+        journal = {
+            "phase": "preparing",
+            "previous": previous,
+            "database": str(database),
+            "schema": original_schema,
+            "target": target,
+            "token": uuid.uuid4().hex,
+        }
+        old_journal = read_json(folder / "transaction.json", {})
         atomic(folder / "transaction.json", journal)
-        log(folder, "Возврат завершён" if rollback else "Обновление завершено: " + target)
-        return True
+        try:
+            if rollback:
+                candidate = safe_previous(old_journal, database)
+            else:
+                preflight(root, target, database, folder)
+                candidate = None
+            if candidate is None:
+                candidate = prepare(root, target, folder)
+            journal["phase"] = "backing_up"
+            atomic(folder / "transaction.json", journal)
+            backup = folder.parent / "backups" / ("pre-update-" + uuid.uuid4().hex + ".sqlite3")
+            backup_database(database, backup)
+            journal.update(phase="testing", backup=str(backup))
+            atomic(folder / "transaction.json", journal)
+            with tempfile.TemporaryDirectory(dir=folder) as scratch:
+                scratch = Path(scratch)
+                test_db = scratch / "library.sqlite3"
+                backup_database(backup, test_db)
+                probe(candidate, test_db, scratch)
+                if schema(test_db) != original_schema:
+                    raise UpdateError("Новая версия меняет схему. Установка заблокирована.")
+                probe(previous, test_db, scratch)
+                env = environment()
+                env.update(
+                    QT_QPA_PLATFORM="offscreen",
+                    XDG_DATA_HOME=str(scratch / "xdg"),
+                    XDG_CONFIG_HOME=str(scratch / "config"),
+                )
+                run(
+                    [candidate["python"], "-m", "pytest", "-q"],
+                    cwd=candidate["code"],
+                    env=env,
+                    timeout=300,
+                )
+            if not rollback and check(root)["target"] != target:
+                raise UpdateError("main изменилась. Подтвердите новую ревизию заново.")
+            if validate(root) != previous["revision"] or schema(database) != original_schema:
+                raise UpdateError("Исходная версия или схема изменились во время подготовки")
+            journal.update(phase="launching", candidate=candidate)
+            atomic(folder / "transaction.json", journal)
+            atomic(folder / "active.json", candidate)
+        except Exception as error:  # noqa: BLE001 - defer recovery for any preparation failure
+            journal.update(
+                phase="failed",
+                error=str(error)
+                if isinstance(error, UpdateError)
+                else "Ошибка подготовки. Старая версия сохранена.",
+            )
+            atomic(folder / "active.json", previous)
+            atomic(folder / "transaction.json", journal)
+            log(folder, journal["error"])
+            return InstallOutcome(False, previous, UpdateError(journal["error"]), journal["token"])
+    try:
+        launch(candidate, folder, journal["token"])
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        with lease(folder / "gui.lock"), application_lock(database):
+            restored = safe_previous(journal, database)
+            atomic(folder / "active.json", restored)
+            journal.update(phase="failed", error="Неудачный запуск; выбрана предыдущая версия")
+            atomic(folder / "transaction.json", journal)
+            log(folder, journal["error"])
+        return InstallOutcome(False, restored, token=journal["token"])
+    journal.update(
+        phase="rolled_back" if rollback else "complete",
+        installed=candidate,
+        completed_at=datetime.now(UTC).isoformat(),
+    )
+    atomic(folder / "transaction.json", journal)
+    log(folder, "Возврат завершён" if rollback else "Обновление завершено: " + target)
+    return InstallOutcome(True)
 
 
 def main():
@@ -387,14 +431,9 @@ def main():
                 raise UpdateError("Установка запускается только после сохранения и закрытия GUI")
             with os.fdopen(args.wait_fd, "rb") as gate:
                 gate.read()  # EOF after process exit, not window.hide().
-            try:
-                succeeded = install(
-                    args.root, args.target, args.database, rollback=args.action == "rollback"
-                )
-            except (OSError, ValueError, RuntimeError):
-                # Pointer recovery is done under the installer lock on the next ordinary launch.
-                launch(version(args.root), state_dir())
-                raise
+            succeeded = install(
+                args.root, args.target, args.database, rollback=args.action == "rollback"
+            )
             value = {"ok": succeeded}
             if not succeeded:
                 print(json.dumps(value))
